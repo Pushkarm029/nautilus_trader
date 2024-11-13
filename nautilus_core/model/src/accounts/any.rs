@@ -13,6 +13,8 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -20,6 +22,7 @@ use crate::{
     enums::AccountType,
     events::account::state::AccountState,
     identifiers::AccountId,
+    types::{currency::Currency, money::Money},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +58,20 @@ impl AccountAny {
         match self {
             AccountAny::Margin(margin) => margin.apply(event),
             AccountAny::Cash(cash) => cash.apply(event),
+        }
+    }
+
+    pub fn balances_locked(&self) -> HashMap<Currency, Money> {
+        match self {
+            AccountAny::Margin(margin) => margin.balances_locked(),
+            AccountAny::Cash(cash) => cash.balances_locked(),
+        }
+    }
+
+    pub fn base_currency(&self) -> Option<Currency> {
+        match self {
+            AccountAny::Margin(margin) => margin.base_currency(),
+            AccountAny::Cash(cash) => cash.base_currency(),
         }
     }
 

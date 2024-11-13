@@ -30,14 +30,14 @@ use nautilus_common::{cache::Cache, clock::Clock, msgbus::MessageBus};
 use nautilus_model::{
     accounts::any::AccountAny,
     data::quote::QuoteTick,
-    enums::OrderSide,
+    enums::{OrderSide, PositionSide, PriceType},
     events::{account::state::AccountState, order::OrderEventAny, position::PositionEvent},
     identifiers::{InstrumentId, Venue},
     instruments::any::InstrumentAny,
     position::Position,
-    types::money::Money,
+    types::{currency::Currency, money::Money, price::Price},
 };
-use rust_decimal::Decimal;
+use rust_decimal::{prelude::FromPrimitive, Decimal};
 
 pub struct Portfolio {
     clock: Rc<RefCell<dyn Clock>>,
@@ -76,79 +76,352 @@ impl Portfolio {
     }
 
     #[must_use]
-    pub fn balances_locked(&self, venue: &Venue) -> HashMap<Venue, Money> {
-        todo!()
+    pub fn balances_locked(&self, venue: &Venue) -> HashMap<Currency, Money> {
+        self.cache.borrow().account_for_venue(venue).map_or_else(
+            || {
+                log::error!(
+                    "Cannot get balances locked: no account generated for {}",
+                    venue
+                );
+                HashMap::new()
+            },
+            nautilus_model::accounts::any::AccountAny::balances_locked,
+        )
     }
 
     #[must_use]
-    pub fn margins_init(&self, venue: &Venue) -> HashMap<Venue, Money> {
-        todo!()
+    pub fn margins_init(&self, venue: &Venue) -> HashMap<InstrumentId, Money> {
+        self.cache.borrow().account_for_venue(venue).map_or_else(
+            || {
+                log::error!(
+                    "Cannot get initial (order) margins: no account registered for {}",
+                    venue
+                );
+                HashMap::new()
+            },
+            |account| match account {
+                AccountAny::Margin(margin_account) => margin_account.initial_margins(),
+                AccountAny::Cash(_) => {
+                    log::warn!("Initial margins not applicable for cash account");
+                    HashMap::new()
+                }
+            },
+        )
     }
 
     #[must_use]
-    pub fn margins_maint(&self, venue: &Venue) -> HashMap<Venue, Money> {
-        todo!()
+    pub fn margins_maint(&self, venue: &Venue) -> HashMap<InstrumentId, Money> {
+        self.cache.borrow().account_for_venue(venue).map_or_else(
+            || {
+                log::error!(
+                    "Cannot get maintenance (position) margins: no account registered for {}",
+                    venue
+                );
+                HashMap::new()
+            },
+            |account| match account {
+                AccountAny::Margin(margin_account) => margin_account.maintenance_margins(),
+                AccountAny::Cash(_) => {
+                    log::warn!("Maintenance margins not applicable for cash account");
+                    HashMap::new()
+                }
+            },
+        )
     }
 
     #[must_use]
-    pub fn unrealized_pnls(&self, venue: &Venue) -> HashMap<Venue, Money> {
-        todo!()
+    pub fn unrealized_pnls(&mut self, venue: &Venue) -> HashMap<Currency, Money> {
+        let instrument_ids = {
+            let binding = self.cache.borrow();
+            let positions = binding.positions(Some(venue), None, None, None);
+
+            if positions.is_empty() {
+                return HashMap::new(); // Nothing to calculate
+            }
+
+            let instrument_ids: HashSet<InstrumentId> =
+                positions.iter().map(|p| p.instrument_id).collect();
+
+            instrument_ids
+        };
+
+        let mut unrealized_pnls: HashMap<Currency, f64> = HashMap::new();
+
+        for instrument_id in instrument_ids {
+            if let Some(&pnl) = self.unrealized_pnls.get(&instrument_id) {
+                // PnL already calculated
+                *unrealized_pnls.entry(pnl.currency).or_insert(0.0) += pnl.as_f64();
+                continue;
+            }
+
+            // Calculate PnL
+            let pnl = self.calculate_unrealized_pnl(&instrument_id);
+            match pnl {
+                Some(pnl) => *unrealized_pnls.entry(pnl.currency).or_insert(0.0) += pnl.as_f64(),
+                None => continue,
+            }
+        }
+
+        unrealized_pnls
+            .into_iter()
+            .map(|(currency, amount)| (currency, Money::new(amount, currency)))
+            .collect()
     }
 
     #[must_use]
-    pub fn realized_pnls(&self, venue: &Venue) -> HashMap<Venue, Money> {
-        todo!()
+    pub fn realized_pnls(&mut self, venue: &Venue) -> HashMap<Currency, Money> {
+        let instrument_ids = {
+            let binding = self.cache.borrow();
+            let positions = binding.positions(Some(venue), None, None, None);
+
+            if positions.is_empty() {
+                return HashMap::new(); // Nothing to calculate
+            }
+
+            let instrument_ids: HashSet<InstrumentId> =
+                positions.iter().map(|p| p.instrument_id).collect();
+
+            instrument_ids
+        };
+
+        let mut realized_pnls: HashMap<Currency, f64> = HashMap::new();
+
+        for instrument_id in instrument_ids {
+            if let Some(&pnl) = self.realized_pnls.get(&instrument_id) {
+                // PnL already calculated
+                *realized_pnls.entry(pnl.currency).or_insert(0.0) += pnl.as_f64();
+                continue;
+            }
+
+            // Calculate PnL
+            let pnl = self.calculate_unrealized_pnl(&instrument_id);
+            match pnl {
+                Some(pnl) => *realized_pnls.entry(pnl.currency).or_insert(0.0) += pnl.as_f64(),
+                None => continue,
+            }
+        }
+
+        realized_pnls
+            .into_iter()
+            .map(|(currency, amount)| (currency, Money::new(amount, currency)))
+            .collect()
     }
 
     #[must_use]
-    pub fn net_exposures(&self, venue: &Venue) -> HashMap<Venue, Money> {
-        todo!()
+    pub fn net_exposures(&self, venue: &Venue) -> Option<HashMap<Currency, Money>> {
+        // TODO: Move it inside a seperate scope, to end its lifetime earlier.
+        let binding = self.cache.borrow();
+
+        // Get account for venue
+        let account = if let Some(account) = binding.account_for_venue(venue) {
+            account
+        } else {
+            log::error!(
+                "Cannot calculate net exposures: no account registered for {}",
+                venue
+            );
+            return None; // Cannot calculate
+        };
+
+        let positions_open = binding.positions_open(Some(venue), None, None, None);
+        if positions_open.is_empty() {
+            return Some(HashMap::new()); // Nothing to calculate
+        }
+
+        let mut net_exposures: HashMap<Currency, f64> = HashMap::new();
+
+        for position in positions_open {
+            let instrument = if let Some(instrument) = binding.instrument(&position.instrument_id) {
+                instrument
+            } else {
+                log::error!(
+                    "Cannot calculate net exposures: no instrument for {}",
+                    position.instrument_id
+                );
+                return None; // Cannot calculate
+            };
+
+            if position.side == PositionSide::Flat {
+                log::error!(
+                    "Cannot calculate net exposures: position is flat for {}",
+                    position.instrument_id
+                );
+                continue; // Nothing to calculate
+            }
+
+            let last = self.get_last_price(position)?;
+
+            let xrate = self.calculate_xrate_to_base(instrument, account, position.entry);
+
+            if xrate == 0.0 {
+                log::error!(
+                    "Cannot calculate net exposures: insufficient data for {}/{:?}",
+                    instrument.settlement_currency(),
+                    account.base_currency()
+                );
+                return None; // Cannot calculate
+            }
+
+            let settlement_currency = account
+                .base_currency()
+                .unwrap_or_else(|| instrument.settlement_currency());
+
+            let net_exposure = instrument
+                .calculate_notional_value(position.quantity, last, None)
+                .as_f64()
+                * xrate;
+
+            // TODO: Doubtful: net_exposure = round(net_exposure * xrate, settlement_currency._mem.precision)
+            let net_exposure = (net_exposure * 10f64.powi(settlement_currency.precision.into()))
+                .round()
+                / 10f64.powi(settlement_currency.precision.into());
+
+            *net_exposures.entry(settlement_currency).or_insert(0.0) += net_exposure;
+        }
+
+        Some(
+            net_exposures
+                .into_iter()
+                .map(|(currency, amount)| (currency, Money::new(amount, currency)))
+                .collect(),
+        )
     }
 
     #[must_use]
-    pub fn unrealized_pnl(&self, instrument_id: &InstrumentId) -> Option<Money> {
-        todo!()
+    pub fn unrealized_pnl(&mut self, instrument_id: &InstrumentId) -> Option<Money> {
+        self.unrealized_pnls
+            .get(instrument_id)
+            .copied()
+            .or_else(|| {
+                let pnl = self.calculate_unrealized_pnl(instrument_id)?;
+                self.unrealized_pnls.insert(*instrument_id, pnl);
+                Some(pnl)
+            })
     }
 
     #[must_use]
-    pub fn realized_pnl(&self, instrument_id: &InstrumentId) -> Option<Money> {
-        todo!()
+    pub fn realized_pnl(&mut self, instrument_id: &InstrumentId) -> Option<Money> {
+        self.realized_pnls.get(instrument_id).copied().or_else(|| {
+            let pnl = self.calculate_realized_pnl(instrument_id)?;
+            self.realized_pnls.insert(*instrument_id, pnl);
+            Some(pnl)
+        })
     }
 
     #[must_use]
     pub fn net_exposure(&self, instrument_id: &InstrumentId) -> Option<Money> {
-        todo!()
+        let binding = self.cache.borrow();
+
+        let account = if let Some(account) = binding.account_for_venue(&instrument_id.venue) {
+            account
+        } else {
+            log::error!(
+                "Cannot calculate net exposure: no account registered for {}",
+                instrument_id.venue
+            );
+            return None;
+        };
+
+        let instrument = if let Some(instrument) = binding.instrument(instrument_id) {
+            instrument
+        } else {
+            log::error!(
+                "Cannot calculate net exposure: no instrument for {}",
+                instrument_id
+            );
+            return None;
+        };
+
+        let positions_open = binding.positions_open(
+            None, // Faster query filtering
+            Some(instrument_id),
+            None,
+            None,
+        );
+
+        if positions_open.is_empty() {
+            return Some(Money::new(0.0, instrument.settlement_currency()));
+        }
+
+        let mut net_exposure = 0.0;
+
+        for position in positions_open {
+            let last = self.get_last_price(position)?;
+
+            let xrate = self.calculate_xrate_to_base(instrument, account, position.entry);
+
+            if xrate == 0.0 {
+                log::error!(
+                    "Cannot calculate net exposure: insufficient data for {}/{:?}",
+                    instrument.settlement_currency(),
+                    account.base_currency()
+                );
+                return None;
+            }
+
+            let notional_value = instrument
+                .calculate_notional_value(position.quantity, last, None)
+                .as_f64();
+
+            net_exposure += notional_value * xrate;
+        }
+
+        let settlement_currency = account
+            .base_currency()
+            .unwrap_or_else(|| instrument.settlement_currency());
+
+        Some(Money::new(net_exposure, settlement_currency))
     }
 
     #[must_use]
-    pub fn net_position(&self, instrument_id: &InstrumentId) -> Option<Decimal> {
-        todo!()
+    pub fn net_position(&self, instrument_id: &InstrumentId) -> Decimal {
+        self.net_positions
+            .get(instrument_id)
+            .copied()
+            .unwrap_or(Decimal::ZERO)
     }
 
     #[must_use]
     pub fn is_net_long(&self, instrument_id: &InstrumentId) -> bool {
-        todo!()
+        self.net_positions
+            .get(instrument_id)
+            .copied()
+            .map_or_else(|| false, |net_position| net_position > Decimal::ZERO)
     }
 
     #[must_use]
     pub fn is_net_short(&self, instrument_id: &InstrumentId) -> bool {
-        todo!()
+        self.net_positions
+            .get(instrument_id)
+            .copied()
+            .map_or_else(|| false, |net_position| net_position < Decimal::ZERO)
     }
 
     #[must_use]
     pub fn is_flat(&self, instrument_id: &InstrumentId) -> bool {
-        todo!()
+        self.net_positions
+            .get(instrument_id)
+            .copied()
+            .map_or_else(|| true, |net_position| net_position == Decimal::ZERO)
     }
 
     #[must_use]
     pub fn is_completely_flat(&self) -> bool {
-        todo!()
+        for net_position in self.net_positions.values() {
+            if *net_position != Decimal::ZERO {
+                return false;
+            }
+        }
+
+        true
     }
 
     // -- COMMANDS --------------------------------------------------------------------------------
 
     pub fn initialize_orders(&mut self) {
-        todo!()
+        //     let binding = self.cache.borrow();
+
+        //     let all_orders_open = binding.orders_open(venue, instrument_id, strategy_id, side)
     }
 
     pub fn initialize_positions(&mut self) {
@@ -156,7 +429,35 @@ impl Portfolio {
     }
 
     pub fn update_quote_tick(&mut self, quote: &QuoteTick) {
-        todo!()
+        self.unrealized_pnls.remove(&quote.instrument_id);
+
+        if self.initialized || !self.pending_calcs.contains(&quote.instrument_id) {
+            return;
+        }
+
+        let binding = self.cache.borrow();
+        let account = binding.account_for_venue(&quote.instrument_id.venue);
+        if account.is_none() {
+            log::error!(
+                "Cannot update tick: no account registered for {}",
+                quote.instrument_id.venue
+            );
+            return;
+        }
+
+        let instrument = binding.instrument(&quote.instrument_id);
+        if instrument.is_none() {
+            log::error!(
+                "Cannot update tick: no instrument found for {}",
+                quote.instrument_id
+            );
+            return;
+        }
+
+        let orders_open = binding.orders_open(None, Some(&quote.instrument_id), None, None);
+
+        // Initialize initial (order) margin
+        // let result_init = self.accounts.
     }
 
     pub fn update_account(&mut self, event: &AccountState) {
@@ -178,31 +479,219 @@ impl Portfolio {
     // }
 
     fn update_net_position(
-        &self,
+        &mut self,
         instrument_id: &InstrumentId,
         positions_open: Vec<&Position>,
-    ) -> Decimal {
-        todo!()
+    ) {
+        let mut net_position = Decimal::ZERO;
+
+        for position in positions_open {
+            net_position += Decimal::from_f64(position.signed_qty).unwrap_or(Decimal::ZERO);
+        }
+
+        let existing_position = self.net_position(instrument_id);
+        if existing_position != net_position {
+            self.net_positions.insert(*instrument_id, net_position);
+            log::info!("{} net_position={}", instrument_id, net_position);
+        }
     }
 
-    fn calculate_unrealized_pnl(&self, instrument_id: &InstrumentId) -> Money {
-        todo!()
+    fn calculate_unrealized_pnl(&mut self, instrument_id: &InstrumentId) -> Option<Money> {
+        let binding = self.cache.borrow();
+
+        let account = if let Some(account) = binding.account_for_venue(&instrument_id.venue) {
+            account
+        } else {
+            log::error!(
+                "Cannot calculate unrealized PnL: no account registered for {}",
+                instrument_id.venue
+            );
+            return None;
+        };
+
+        let instrument = if let Some(instrument) = binding.instrument(instrument_id) {
+            instrument
+        } else {
+            log::error!(
+                "Cannot calculate unrealized PnL: no instrument for {}",
+                instrument_id
+            );
+            return None;
+        };
+
+        let currency = account
+            .base_currency()
+            .unwrap_or_else(|| instrument.settlement_currency());
+
+        let positions_open = binding.positions_open(
+            None, // Faster query filtering
+            Some(instrument_id),
+            None,
+            None,
+        );
+
+        if positions_open.is_empty() {
+            return Some(Money::new(0.0, currency));
+        }
+
+        let mut total_pnl = 0.0;
+
+        for position in positions_open {
+            if position.instrument_id != *instrument_id {
+                continue; // Nothing to calculate
+            }
+
+            if position.side == PositionSide::Flat {
+                continue; // Nothing to calculate
+            }
+
+            let last = if let Some(price) = self.get_last_price(position) {
+                price
+            } else {
+                log::debug!(
+                    "Cannot calculate unrealized PnL: no prices for {}",
+                    instrument_id
+                );
+                self.pending_calcs.insert(*instrument_id);
+                return None; // Cannot calculate
+            };
+
+            let mut pnl = position.unrealized_pnl(last).as_f64();
+
+            if let Some(base_currency) = account.base_currency() {
+                let xrate = self.calculate_xrate_to_base(instrument, account, position.entry);
+
+                if xrate == 0.0 {
+                    log::debug!(
+                        "Cannot calculate unrealized PnL: insufficient data for {}/{}",
+                        instrument.settlement_currency(),
+                        base_currency
+                    );
+                    self.pending_calcs.insert(*instrument_id);
+                    return None;
+                }
+
+                let scale = 10f64.powi(currency.precision.into());
+                pnl = ((pnl * xrate) * scale).round() / scale;
+            }
+
+            total_pnl += pnl;
+        }
+
+        Some(Money::new(total_pnl, currency))
     }
 
-    fn calculate_realized_pnl(&self, instrument_id: &InstrumentId) -> Money {
-        todo!()
+    fn calculate_realized_pnl(&mut self, instrument_id: &InstrumentId) -> Option<Money> {
+        let binding = self.cache.borrow();
+
+        let account = if let Some(account) = binding.account_for_venue(&instrument_id.venue) {
+            account
+        } else {
+            log::error!(
+                "Cannot calculate realized PnL: no account registered for {}",
+                instrument_id.venue
+            );
+            return None;
+        };
+
+        let instrument = if let Some(instrument) = binding.instrument(instrument_id) {
+            instrument
+        } else {
+            log::error!(
+                "Cannot calculate realized PnL: no instrument for {}",
+                instrument_id
+            );
+            return None;
+        };
+
+        let currency = account
+            .base_currency()
+            .unwrap_or_else(|| instrument.settlement_currency());
+
+        let positions = binding.positions(
+            None, // Faster query filtering
+            Some(instrument_id),
+            None,
+            None,
+        );
+
+        if positions.is_empty() {
+            return Some(Money::new(0.0, currency));
+        }
+
+        let mut total_pnl = 0.0;
+
+        for position in positions {
+            if position.instrument_id != *instrument_id {
+                continue; // Nothing to calculate
+            }
+
+            if position.side == PositionSide::Flat {
+                continue; // Nothing to calculate
+            }
+
+            let mut pnl = position.realized_pnl?.as_f64();
+
+            if let Some(base_currency) = account.base_currency() {
+                let xrate = self.calculate_xrate_to_base(instrument, account, position.entry);
+
+                if xrate == 0.0 {
+                    log::debug!(
+                        "Cannot calculate realized PnL: insufficient data for {}/{}",
+                        instrument.settlement_currency(),
+                        base_currency
+                    );
+                    self.pending_calcs.insert(*instrument_id);
+                    return None; // Cannot calculate
+                }
+
+                let scale = 10f64.powi(currency.precision.into());
+                pnl = ((pnl * xrate) * scale).round() / scale;
+            }
+
+            total_pnl += pnl;
+        }
+
+        Some(Money::new(total_pnl, currency))
     }
 
-    fn get_last_price(&self, position: &Position) -> Money {
-        todo!()
+    fn get_last_price(&self, position: &Position) -> Option<Price> {
+        let price_type = match position.side {
+            PositionSide::Long => PriceType::Bid,
+            PositionSide::Short => PriceType::Ask,
+            _ => panic!("invalid `PositionSide`, was {}", position.side),
+        };
+
+        let binding = self.cache.borrow();
+
+        binding
+            .price(&position.instrument_id, price_type)
+            .or_else(|| binding.price(&position.instrument_id, PriceType::Last))
     }
 
     fn calculate_xrate_to_base(
         &self,
-        account: &AccountAny,
         instrument: &InstrumentAny,
+        account: &AccountAny,
         side: OrderSide,
     ) -> f64 {
-        todo!()
+        match account.base_currency() {
+            Some(base_currency) => {
+                let price_type = if side == OrderSide::Buy {
+                    PriceType::Bid
+                } else {
+                    PriceType::Ask
+                };
+
+                // self.cache.borrow().get_xrate(
+                //     instrument.id().venue,
+                //     instrument.settlement_currency(),
+                //     base_currency,
+                //     price_type,
+                // )
+                0.0
+            }
+            None => 1.0, // No conversion needed
+        }
     }
 }
