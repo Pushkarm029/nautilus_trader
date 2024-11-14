@@ -52,6 +52,7 @@ use nautilus_model::{
     position::Position,
     types::{currency::Currency, price::Price, quantity::Quantity},
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
@@ -1141,6 +1142,11 @@ impl Cache {
         if let Some(database) = &mut self.database {
             database.add_instrument(&instrument)?;
         }
+
+        // match instrument {
+        //     InstrumentAny::CurrencyPair(_) | InstrumentAny::CryptoPerpetual(_) => {}
+        //     _ => {}
+        // }
 
         self.instruments.insert(instrument.id(), instrument);
         Ok(())
@@ -2474,6 +2480,71 @@ impl Cache {
         self.bar_count(bar_type) > 0
     }
 
+    pub fn get_xrate(
+        &self,
+        venue: &Venue,
+        from_currency: &Currency,
+        to_currency: &Currency,
+        price_type: Option<&PriceType>,
+    ) -> Decimal {
+        if from_currency == to_currency {
+            return Decimal::ONE;
+        }
+
+        // let quotes = self.build_quote_table(venue);
+
+        // self.get_rate()
+        todo!("get_xrate is not implemented");
+    }
+
+    // fn build_quote_table(&self, venue: &Venue) -> (HashMap<String, f64>, HashMap<String, f64>) {
+    //     let mut bid_quotes = HashMap::new();
+    //     let mut ask_quotes = HashMap::new();
+
+    //     for (instrument_id, base_quote) in &self.xrate_symbols {
+    //         if instrument_id.venue != *venue {
+    //             continue;
+    //         }
+
+    //         let (bid_price, ask_price) = if let Some(ticks) = self.quotes.get(instrument_id) {
+    //             // Use quote ticks if available
+    //             if let Some(tick) = ticks.front() {
+    //                 (tick.bid_price, tick.ask_price)
+    //             } else {
+    //                 continue; // Empty ticks vector
+    //             }
+    //         } else {
+    //             // Fall back to bars if no quotes available
+    //             // let bid_bar = self
+    //             //     .bars
+    //             //     .iter()
+    //             //     .find(|(k, _)| {
+    //             //         k.instrument_id() == instrument_id
+    //             //             && matches!(k.spec().price_type, PriceType::Bid)
+    //             //     })
+    //             //     .map(|(_, v)| v);
+
+    //             // let ask_bar = self
+    //             //     .bars
+    //             //     .iter()
+    //             //     .find(|(k, _)| {
+    //             //         k.instrument_id() == instrument_id
+    //             //             && matches!(k.spec().price_type, PriceType::Ask)
+    //             //     })
+    //             //     .map(|(_, v)| v);
+
+    //             // match (bid_bar, ask_bar) {
+    //             //     (Some(bid), Some(ask)) => (bid.close, ask.close),
+    //             //     _ => continue, // Missing either bid or ask bar
+    //             // }
+    //         };
+
+    //         bid_quotes.insert(base_quote.clone(), bid_price.as_f64());
+    //         ask_quotes.insert(base_quote.clone(), ask_price.as_f64());
+    //     }
+
+    //     (bid_quotes, ask_quotes)
+    // }
     // -- INSTRUMENT QUERIES ----------------------------------------------------------------------
 
     /// Returns a reference to the instrument for the given `instrument_id` (if found).

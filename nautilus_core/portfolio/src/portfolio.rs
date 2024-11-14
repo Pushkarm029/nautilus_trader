@@ -23,9 +23,20 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::Arc,
 };
 
-use nautilus_analysis::analyzer::PortfolioAnalyzer;
+use nautilus_analysis::{
+    analyzer::PortfolioAnalyzer,
+    statistics::{
+        expectancy::Expectancy, long_ratio::LongRatio, loser_max::MaxLoser, loser_min::MinLoser,
+        profit_factor::ProfitFactor, returns_avg::ReturnsAverage,
+        returns_avg_loss::ReturnsAverageLoss, returns_avg_win::ReturnsAverageWin,
+        returns_volatility::ReturnsVolatility, risk_return_ratio::RiskReturnRatio,
+        sharpe_ratio::SharpeRatio, sortino_ratio::SortinoRatio, win_rate::WinRate,
+        winner_avg::AvgWinner, winner_max::MaxWinner, winner_min::MinWinner,
+    },
+};
 use nautilus_common::{cache::Cache, clock::Clock, msgbus::MessageBus};
 use nautilus_model::{
     accounts::any::AccountAny,
@@ -37,7 +48,10 @@ use nautilus_model::{
     position::Position,
     types::{currency::Currency, money::Money, price::Price},
 };
-use rust_decimal::{prelude::FromPrimitive, Decimal};
+use rust_decimal::{
+    prelude::{FromPrimitive, ToPrimitive},
+    Decimal,
+};
 
 pub struct Portfolio {
     clock: Rc<RefCell<dyn Clock>>,
@@ -57,6 +71,48 @@ impl Portfolio {
     // pub fn set_specific_venue(&mut self, venue: Venue) { // Lets try not to use this?
     //     todo!()
     // }
+
+    pub fn new(
+        msgbus: Rc<RefCell<MessageBus>>,
+        cache: Rc<RefCell<Cache>>,
+        clock: Rc<RefCell<dyn Clock>>,
+    ) -> Portfolio {
+        let mut analyzer = PortfolioAnalyzer::new();
+
+        // Register default statistics
+        analyzer.register_statistic(Arc::new(MaxWinner {}));
+        analyzer.register_statistic(Arc::new(AvgWinner {}));
+        analyzer.register_statistic(Arc::new(MinWinner {}));
+        analyzer.register_statistic(Arc::new(MinLoser {}));
+        analyzer.register_statistic(Arc::new(MaxLoser {}));
+        analyzer.register_statistic(Arc::new(Expectancy {}));
+        analyzer.register_statistic(Arc::new(WinRate {}));
+        analyzer.register_statistic(Arc::new(ReturnsVolatility::new(None)));
+        analyzer.register_statistic(Arc::new(ReturnsAverage {}));
+        analyzer.register_statistic(Arc::new(ReturnsAverageLoss {}));
+        analyzer.register_statistic(Arc::new(ReturnsAverageWin {}));
+        analyzer.register_statistic(Arc::new(SharpeRatio::new(None)));
+        analyzer.register_statistic(Arc::new(SortinoRatio::new(None)));
+        analyzer.register_statistic(Arc::new(ProfitFactor {}));
+        analyzer.register_statistic(Arc::new(RiskReturnRatio {}));
+        analyzer.register_statistic(Arc::new(LongRatio::new(None)));
+
+        // Register endpoints
+        // msgbus.borrow().register("Portfolio.update_account", Self::update_account);
+
+        Portfolio {
+            clock,
+            cache,
+            msgbus,
+            accounts: HashMap::new(),
+            analyzer: PortfolioAnalyzer::new(),
+            unrealized_pnls: HashMap::new(),
+            realized_pnls: HashMap::new(),
+            net_positions: HashMap::new(),
+            pending_calcs: HashSet::new(),
+            initialized: false,
+        }
+    }
 
     // -- QUERIES ---------------------------------------------------------------------------------
 
@@ -683,13 +739,16 @@ impl Portfolio {
                     PriceType::Ask
                 };
 
-                // self.cache.borrow().get_xrate(
-                //     instrument.id().venue,
-                //     instrument.settlement_currency(),
-                //     base_currency,
-                //     price_type,
-                // )
-                0.0
+                self.cache
+                    .borrow()
+                    .get_xrate(
+                        &instrument.id().venue,
+                        &instrument.settlement_currency(),
+                        &base_currency,
+                        Some(&price_type),
+                    )
+                    .to_f64()
+                    .expect("Fails to convert Decimal to f64")
             }
             None => 1.0, // No conversion needed
         }
