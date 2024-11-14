@@ -27,7 +27,6 @@ from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.core import nautilus_pyo3
-from nautilus_trader.core.nautilus_pyo3 import TardisMachineClient
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.live.data_client import LiveMarketDataClient
 from nautilus_trader.model.data import Bar
@@ -94,8 +93,8 @@ class TardisDataClient(LiveMarketDataClient):
 
         # Tardis Machine
         self._ws_base_url = self._config.base_url_ws
-        self._ws_client: TardisMachineClient = self._create_websocket_client()
-        self._ws_clients: dict[InstrumentId, TardisMachineClient] = {}
+        self._ws_client: nautilus_pyo3.TardisMachineClient = self._create_websocket_client()
+        self._ws_clients: dict[InstrumentId, nautilus_pyo3.TardisMachineClient] = {}
         self._ws_pending_infos: list[nautilus_pyo3.InstrumentMiniInfo] = []
         self._ws_pending_streams: list[nautilus_pyo3.StreamNormalizedRequestOptions] = []
 
@@ -144,7 +143,7 @@ class TardisDataClient(LiveMarketDataClient):
         self._main_ws_delay = True
         await asyncio.sleep(1.0)  # Wait for websocket clients to close (temporary)
 
-    def _create_websocket_client(self) -> TardisMachineClient:
+    def _create_websocket_client(self) -> nautilus_pyo3.TardisMachineClient:
         self._log.info("Creating new TardisMachineClient", LogColor.MAGENTA)
         return nautilus_pyo3.TardisMachineClient(
             base_url=self._ws_base_url,
@@ -200,35 +199,17 @@ class TardisDataClient(LiveMarketDataClient):
             return
 
         instrument_info = create_instrument_info(instrument)
-        tardis_exchange_str = instrument_info.exchange
-        raw_symbol_str = instrument.raw_symbol.value
-        self._log.info(
-            f"Subscribing stream: exchange={tardis_exchange_str}, raw_symbol={raw_symbol_str}, data_type={tardis_data_type}",
-            LogColor.MAGENTA,
-        )
         stream_request = create_stream_normalized_request_options(
-            exchange=tardis_exchange_str,
-            symbols=[raw_symbol_str],
+            exchange=nautilus_pyo3.tardis_exchange_from_venue_str(instrument_id.venue.value)[0],
+            symbols=[instrument_id.symbol.value],
             data_types=[tardis_data_type],
+            timeout_interval_ms=5_000,
         )
-
         if self._main_ws_delay:
             self._ws_pending_infos.append(instrument_info)
             self._ws_pending_streams.append(stream_request)
-            return
 
-        ws_client = self._create_websocket_client()
-        future = asyncio.ensure_future(
-            ws_client.stream(
-                instruments=[instrument_info],
-                options=[stream_request],
-                callback=self._handle_msg,
-            ),
-        )
-        self._ws_client_futures.add(future)
-
-        ws_client_key = get_ws_client_key(instrument_id, tardis_data_type)
-        self._ws_clients[ws_client_key] = ws_client
+        # TODO: Start new tardis-machine client
 
     async def _subscribe_order_book_deltas(
         self,
@@ -245,8 +226,7 @@ class TardisDataClient(LiveMarketDataClient):
             )
             return
 
-        tardis_data_type = convert_nautilus_data_type_to_tardis_data_type(OrderBookDelta)
-        self._subscribe_stream(instrument_id, tardis_data_type, "order book deltas")
+        self._subscribe_stream(instrument_id, "book_change", "order book deltas")
 
     async def _subscribe_order_book_snapshots(
         self,
@@ -263,81 +243,24 @@ class TardisDataClient(LiveMarketDataClient):
             )
             return
 
-        tardis_data_type = convert_nautilus_data_type_to_tardis_data_type(OrderBookDepth10)
-        tardis_data_type = f"{tardis_data_type}_{depth}_0ms"
-        self._subscribe_stream(instrument_id, tardis_data_type, "order book snapshots")
+        self._subscribe_stream(instrument_id, f"book_snapshot_{depth}_0ms", "order book snapshots")
 
     async def _subscribe_quote_ticks(self, instrument_id: InstrumentId) -> None:
-        instrument = self._cache.instrument(instrument_id)
-        if instrument is None:
-            self._log.error(f"Cannot subscribe quotes: no instrument for {instrument_id}")
-            return
-
-        instrument_info = create_instrument_info(instrument)
-        stream_request = create_stream_normalized_request_options(
-            exchange=nautilus_pyo3.tardis_exchange_from_venue_str(instrument_id.venue.value)[0],
-            symbols=[instrument_id.symbol.value],
-            data_types=["quote"],
-            timeout_interval_ms=5_000,
-        )
-        if self._main_ws_delay:
-            self._ws_pending_infos.append(instrument_info)
-            self._ws_pending_streams.append(stream_request)
-            return
-
-        # TODO: Start new tardis-machine client
+        self._subscribe_stream(instrument_id, "quote", "quotes")
 
     async def _subscribe_trade_ticks(self, instrument_id: InstrumentId) -> None:
-        instrument = self._cache.instrument(instrument_id)
-        if instrument is None:
-            self._log.error(f"Cannot subscribe trades: no instrument for {instrument_id}")
-            return
-
-        instrument_info = create_instrument_info(instrument)
-        stream_request = create_stream_normalized_request_options(
-            exchange=nautilus_pyo3.tardis_exchange_from_venue_str(instrument_id.venue.value)[0],
-            symbols=[instrument_id.symbol.value],
-            data_types=["trade"],
-            timeout_interval_ms=5_000,
-        )
-        if self._main_ws_delay:
-            self._ws_pending_infos.append(instrument_info)
-            self._ws_pending_streams.append(stream_request)
-            return
-
-        # TODO: Start new tardis-machine client
+        self._subscribe_stream(instrument_id, "trade", "trades")
 
     async def _subscribe_bars(self, bar_type: BarType) -> None:
-        instrument_id = bar_type.instrument_id
-        instrument = self._cache.instrument(instrument_id)
-        if instrument is None:
-            self._log.error(f"Cannot subscribe bars: no instrument for {instrument_id}")
-            return
-
-        instrument_info = create_instrument_info(instrument)
         bar_type_pyo3 = nautilus_pyo3.BarType.from_str(str(bar_type))
-        stream_request = create_stream_normalized_request_options(
-            exchange=nautilus_pyo3.tardis_exchange_from_venue_str(instrument_id.venue.value)[0],
-            symbols=[instrument_id.symbol.value],
-            data_types=[nautilus_pyo3.bar_spec_to_tardis_trade_bar_string(bar_type_pyo3.spec)],
-            timeout_interval_ms=5_000,
-        )
-        if self._main_ws_delay:
-            self._ws_pending_infos.append(instrument_info)
-            self._ws_pending_streams.append(stream_request)
-            return
-
-        # TODO: Start new tardis-machine client
+        tardis_data_type = nautilus_pyo3.bar_spec_to_tardis_trade_bar_string(bar_type_pyo3.spec)
+        self._subscribe_stream(bar_type.instrument_id, tardis_data_type, "bars")
 
     async def _unsubscribe_order_book_deltas(self, instrument_id: InstrumentId) -> None:
-        tardis_data_type = convert_nautilus_data_type_to_tardis_data_type(OrderBookDelta)
-        ws_client_key = get_ws_client_key(instrument_id, tardis_data_type)
-        self._dispose_websocket_client_by_key(ws_client_key)
+        pass  # TODO: Implement
 
     async def _unsubscribe_order_book_snapshots(self, instrument_id: InstrumentId) -> None:
-        tardis_data_type = convert_nautilus_data_type_to_tardis_data_type(OrderBookDepth10)
-        ws_client_key = get_ws_client_key(instrument_id, tardis_data_type)
-        self._dispose_websocket_client_by_key(ws_client_key)
+        pass  # TODO: Implement
 
     async def _unsubscribe_quote_ticks(self, instrument_id: InstrumentId) -> None:
         pass  # TODO: Implement
