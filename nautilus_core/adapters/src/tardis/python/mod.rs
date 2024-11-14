@@ -26,9 +26,8 @@ use pyo3::prelude::*;
 /// Loaded as nautilus_pyo3.tardis
 #[pymodule]
 pub fn tardis(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<super::machine::types::InstrumentMiniInfo>()?;
-    m.add_class::<super::machine::types::ReplayNormalizedRequestOptions>()?;
-    m.add_class::<super::machine::types::StreamNormalizedRequestOptions>()?;
+    m.add_class::<super::http::client::TardisHttpClient>()?;
+    m.add_class::<super::machine::InstrumentMiniInfo>()?;
     m.add_class::<super::machine::TardisMachineClient>()?;
     m.add_class::<super::http::client::TardisHttpClient>()?;
     m.add_function(wrap_pyfunction!(

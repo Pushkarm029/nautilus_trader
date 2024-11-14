@@ -21,6 +21,7 @@ from nautilus_trader.adapters.tardis.constants import TARDIS
 from nautilus_trader.adapters.tardis.constants import TARDIS_CLIENT_ID
 from nautilus_trader.adapters.tardis.factories import TardisLiveDataClientFactory
 from nautilus_trader.cache.config import CacheConfig
+from nautilus_trader.common.config import DatabaseConfig
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LiveExecEngineConfig
@@ -29,7 +30,6 @@ from nautilus_trader.config import StrategyConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.book import OrderBook
-from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
@@ -45,19 +45,12 @@ from nautilus_trader.trading.strategy import Strategy
 # docker run -p 8000:8000 -p 8001:8001 -e "TM_API_KEY=YOUR_API_KEY" -d tardisdev/tardis-machine
 
 instrument_ids = [
-    InstrumentId.from_str("BTCUSDT-PERP.BINANCE"),
-    # InstrumentId.from_str("BTCUSDT-SPOT.BYBIT"),
-    # InstrumentId.from_str("BTCUSDT-LINEAR.BYBIT"),
-    # InstrumentId.from_str("BTCUSDT.BINANCE"),
-    # InstrumentId.from_str("XBTUSDT.BITMEX"),
-    # InstrumentId.from_str("ETHUSDT.BITMEX"),
-    # InstrumentId.from_str("BTC_USDT.GATEIO"),
-    # InstrumentId.from_str("BTC_USDT-PERP.GATEIO"),
+    InstrumentId.from_str("XBTUSDT.BITMEX"),
+    InstrumentId.from_str("ETHUSDT.BITMEX"),
 ]
 
-# See supported venues https://nautilustrader.io/docs/nightly/integrations/tardis#venues
-venues = {i.venue.value for i in instrument_ids}
-filters = {"venues": frozenset(venues)}
+exchanges = ["bitmex", "binance", "bybit"]
+filters = {"exchanges": frozenset(exchanges)}
 instrument_provider_config = InstrumentProviderConfig(load_all=True, filters=filters)
 
 # Configure the trading node
@@ -72,7 +65,7 @@ config_node = TradingNodeConfig(
         # snapshot_positions_interval_secs=5.0,
     ),
     cache=CacheConfig(
-        # database=DatabaseConfig(),
+        database=DatabaseConfig(),
         encoding="msgpack",
         timestamps_as_iso8601=True,
         buffer_interval_ms=100,
@@ -94,7 +87,7 @@ config_node = TradingNodeConfig(
             instrument_provider=instrument_provider_config,
         ),
     },
-    timeout_connection=20.0,
+    timeout_connection=60.0,
     timeout_reconciliation=10.0,  # Not applicable
     timeout_portfolio=10.0,
     timeout_disconnection=10.0,
@@ -146,18 +139,18 @@ class DataSubscriber(Strategy):
         """
         for instrument_id in self.instrument_ids:
             # from nautilus_trader.model.enums import BookType
+
             # self.subscribe_order_book_at_interval(
             #     instrument_id=instrument_id,
             #     book_type=BookType.L2_MBP,
-            #     depth=10,  # Optimal for Tardis snapshots
+            #     depth=10,
             #     interval_ms=1000,
             # )
 
-            # self.subscribe_order_book_deltas(instrument_id=instrument_id, client_id=self.client_id)
+            self.subscribe_order_book_deltas(instrument_id=instrument_id, client_id=self.client_id)
             self.subscribe_quote_ticks(instrument_id, client_id=self.client_id)
             self.subscribe_trade_ticks(instrument_id, client_id=self.client_id)
 
-            # from nautilus_trader.model.data import BarType
             # bar_type = BarType.from_str(f"{instrument_id}-1-SECOND-LAST-EXTERNAL")
             # self.subscribe_bars(bar_type, client_id=self.client_id)
 
@@ -175,19 +168,16 @@ class DataSubscriber(Strategy):
             # self.request_data(status_data_type)
 
             # from nautilus_trader.model.data import BarType
-            # self.request_bars(BarType.from_str(f"{instrument_id}-1-SECOND-LAST-EXTERNAL"))
+            # self.request_bars(BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL"))
 
     def on_stop(self) -> None:
         """
         Actions to be performed when the strategy is stopped.
         """
         for instrument_id in self.instrument_ids:
-            self.unsubscribe_order_book_deltas(
-                instrument_id=instrument_id,
-                client_id=self.client_id,
-            )
-            self.unsubscribe_quote_ticks(instrument_id, client_id=self.client_id)
-            self.unsubscribe_trade_ticks(instrument_id, client_id=self.client_id)
+            self.subscribe_order_book_deltas(instrument_id=instrument_id, client_id=self.client_id)
+            self.subscribe_quote_ticks(instrument_id, client_id=self.client_id)
+            self.subscribe_trade_ticks(instrument_id, client_id=self.client_id)
 
     def on_historical_data(self, data: Any) -> None:
         self.log.info(repr(data), LogColor.CYAN)
@@ -236,18 +226,6 @@ class DataSubscriber(Strategy):
 
         """
         self.log.info(repr(tick), LogColor.CYAN)
-
-    def on_bar(self, bar: Bar) -> None:
-        """
-        Actions to be performed when the strategy is running and receives a bar.
-
-        Parameters
-        ----------
-        bar : Bar
-            The bar received.
-
-        """
-        self.log.info(repr(bar), LogColor.CYAN)
 
 
 # Configure and initialize your strategy
