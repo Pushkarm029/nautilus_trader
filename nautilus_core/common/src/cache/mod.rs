@@ -2480,6 +2480,7 @@ impl Cache {
         self.bar_count(bar_type) > 0
     }
 
+    #[must_use]
     pub fn get_xrate(
         &self,
         venue: &Venue,
