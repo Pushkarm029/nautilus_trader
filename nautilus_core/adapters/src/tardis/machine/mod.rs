@@ -16,7 +16,6 @@
 pub mod client;
 pub mod message;
 pub mod parse;
-pub mod types;
 
 use std::{
     sync::{
@@ -35,7 +34,8 @@ use tokio_tungstenite::{
     tungstenite::{self, protocol::frame::coding::CloseCode},
     MaybeTlsStream, WebSocketStream,
 };
-use types::{ReplayNormalizedRequestOptions, StreamNormalizedRequestOptions};
+
+use super::enums::Exchange;
 
 pub use crate::tardis::machine::client::TardisMachineClient;
 
