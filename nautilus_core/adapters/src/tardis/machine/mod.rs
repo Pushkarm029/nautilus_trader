@@ -28,7 +28,10 @@ use std::{
 use async_stream::stream;
 use futures_util::{stream::SplitSink, SinkExt, Stream, StreamExt};
 use message::WsMessage;
-use tokio::{net::TcpStream, time::timeout};
+use nautilus_model::identifiers::InstrumentId;
+use serde::{Deserialize, Serialize};
+use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{self, protocol::frame::coding::CloseCode},

@@ -47,7 +47,7 @@ pub struct TardisMachineClient {
     pub base_url: String,
     pub replay_signal: Arc<AtomicBool>,
     pub stream_signal: Arc<AtomicBool>,
-    pub instruments: HashMap<TardisInstrumentKey, Arc<InstrumentMiniInfo>>,
+    pub instruments: HashMap<InstrumentId, Arc<InstrumentMiniInfo>>,
     pub normalize_symbols: bool,
 }
 
