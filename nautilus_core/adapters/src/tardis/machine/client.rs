@@ -47,7 +47,7 @@ pub struct TardisMachineClient {
     pub base_url: String,
     pub replay_signal: Arc<AtomicBool>,
     pub stream_signal: Arc<AtomicBool>,
-    pub instruments: HashMap<InstrumentId, Arc<InstrumentMiniInfo>>,
+    pub instruments: HashMap<TardisInstrumentKey, Arc<InstrumentMiniInfo>>,
     pub normalize_symbols: bool,
 }
 
@@ -74,7 +74,7 @@ impl TardisMachineClient {
 
     pub fn add_instrument_info(&mut self, info: InstrumentMiniInfo) {
         let key = info.as_tardis_instrument_key();
-        self.instruments.insert(key, Arc::new(info));
+        self.instruments.insert(key, Arc::new(info.clone()));
     }
 
     #[must_use]
