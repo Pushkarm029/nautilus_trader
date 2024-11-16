@@ -700,15 +700,14 @@ impl Portfolio {
             }
         };
 
-        let account = match borrowed_cache.account(&account_id) {
-            Some(account) => account,
-            None => {
-                log::error!(
-                    "Cannot update order: no account registered for {}",
-                    account_id
-                );
-                return;
-            }
+        let account = if let Some(account) = borrowed_cache.account(&account_id) {
+            account
+        } else {
+            log::error!(
+                "Cannot update order: no account registered for {}",
+                account_id
+            );
+            return;
         };
 
         match account {
@@ -736,15 +735,14 @@ impl Portfolio {
         }
 
         // let order = borrowed_cache.order(&event.client_order_id());
-        let order = match borrowed_cache.order(&event.client_order_id()) {
-            Some(order) => order,
-            None => {
-                log::error!(
-                    "Cannot update order: {} not found in the cache",
-                    event.client_order_id()
-                );
-                return; // No Order Found
-            }
+        let order = if let Some(order) = borrowed_cache.order(&event.client_order_id()) {
+            order
+        } else {
+            log::error!(
+                "Cannot update order: {} not found in the cache",
+                event.client_order_id()
+            );
+            return; // No Order Found
         };
 
         if matches!(event, OrderEventAny::Rejected(_)) && order.order_type() != OrderType::StopLimit
@@ -752,16 +750,16 @@ impl Portfolio {
             return; // No change to account state
         }
 
-        let instrument = match borrowed_cache.instrument(&event.instrument_id()) {
-            Some(instrument_id) => instrument_id,
-            None => {
+        let instrument =
+            if let Some(instrument_id) = borrowed_cache.instrument(&event.instrument_id()) {
+                instrument_id
+            } else {
                 log::error!(
                     "Cannot update order: no instrument found for {}",
                     event.instrument_id()
                 );
                 return;
-            }
-        };
+            };
 
         if matches!(event, OrderEventAny::Filled(_)) {
             todo!("accounts,updates_balance")

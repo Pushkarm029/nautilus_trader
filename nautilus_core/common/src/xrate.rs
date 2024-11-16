@@ -32,6 +32,7 @@ use ustr::Ustr;
 // TODO: Improve efficiency: Check Top Comment
 /// Returns the calculated exchange rate for the given price type using the
 /// given dictionary of bid and ask quotes.
+#[must_use]
 pub fn get_exchange_rate(
     from_currency: Currency,
     to_currency: Currency,
@@ -64,10 +65,7 @@ pub fn get_exchange_rate(
             })
             .collect(),
         _ => {
-            panic!(
-                "Cannot calculate exchange rate for PriceType: {:?}",
-                price_type
-            );
+            panic!("Cannot calculate exchange rate for PriceType: {price_type:?}");
         }
     };
 
@@ -75,7 +73,7 @@ pub fn get_exchange_rate(
     let mut exchange_rates: HashMap<Ustr, HashMap<Ustr, Decimal>> = HashMap::new();
 
     // Build quote table
-    for (symbol, quote) in calculation_quotes.iter() {
+    for (symbol, quote) in &calculation_quotes {
         // Split symbol into currency pairs
         let pieces: Vec<&str> = symbol.as_str().split('/').collect();
         let code_lhs = Ustr::from(pieces[0]);
@@ -107,7 +105,7 @@ pub fn get_exchange_rate(
         .collect();
 
     // Calculate currency inverses
-    for (perm0, perm1) in code_perms.iter() {
+    for (perm0, perm1) in &code_perms {
         // First direction: perm0 -> perm1
         let rate_0_to_1 = exchange_rates
             .get(perm0)
@@ -145,7 +143,7 @@ pub fn get_exchange_rate(
     }
 
     // Calculate remaining exchange rates through common currencies
-    for (perm0, perm1) in code_perms.iter() {
+    for (perm0, perm1) in &code_perms {
         // Skip if rate already exists
         if exchange_rates
             .get(perm1)
@@ -155,7 +153,7 @@ pub fn get_exchange_rate(
         }
 
         // Search for common currency
-        for code in codes.iter() {
+        for code in &codes {
             // First check: rates through common currency
             let rates_through_common = {
                 let rates_perm0 = exchange_rates.get(perm0);
@@ -214,4 +212,292 @@ pub fn get_exchange_rate(
         .unwrap_or(Decimal::ZERO);
 
     xrate
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use rust_decimal::prelude::FromPrimitive;
+    use rust_decimal_macros::dec;
+
+    use super::*;
+
+    // Helper function to create test quotes
+    fn setup_test_quotes() -> (HashMap<Symbol, Decimal>, HashMap<Symbol, Decimal>) {
+        let mut quotes_bid = HashMap::new();
+        let mut quotes_ask = HashMap::new();
+
+        // Direct pairs
+        quotes_bid.insert(Symbol::from_str_unchecked("EUR/USD"), dec!(1.1000));
+        quotes_ask.insert(Symbol::from_str_unchecked("EUR/USD"), dec!(1.1002));
+
+        quotes_bid.insert(Symbol::from_str_unchecked("GBP/USD"), dec!(1.3000));
+        quotes_ask.insert(Symbol::from_str_unchecked("GBP/USD"), dec!(1.3002));
+
+        quotes_bid.insert(Symbol::from_str_unchecked("USD/JPY"), dec!(110.00));
+        quotes_ask.insert(Symbol::from_str_unchecked("USD/JPY"), dec!(110.02));
+
+        quotes_bid.insert(Symbol::from_str_unchecked("AUD/USD"), dec!(0.7500));
+        quotes_ask.insert(Symbol::from_str_unchecked("AUD/USD"), dec!(0.7502));
+
+        (quotes_bid, quotes_ask)
+    }
+
+    #[test]
+    /// Test same currency conversion
+    fn test_same_currency() {
+        let (quotes_bid, quotes_ask) = setup_test_quotes();
+        let rate = get_exchange_rate(
+            Currency::from_str("USD").unwrap(),
+            Currency::from_str("USD").unwrap(),
+            PriceType::Mid,
+            quotes_bid,
+            quotes_ask,
+        );
+        assert_eq!(rate, Decimal::ONE);
+    }
+
+    #[test]
+    /// Test direct pair conversion
+    fn test_direct_pair() {
+        let (quotes_bid, quotes_ask) = setup_test_quotes();
+
+        // Test bid price
+        let rate_bid = get_exchange_rate(
+            Currency::from_str("EUR").unwrap(),
+            Currency::from_str("USD").unwrap(),
+            PriceType::Bid,
+            quotes_bid.clone(),
+            quotes_ask.clone(),
+        );
+        assert_eq!(rate_bid, dec!(1.1000));
+
+        // Test ask price
+        let rate_ask = get_exchange_rate(
+            Currency::from_str("EUR").unwrap(),
+            Currency::from_str("USD").unwrap(),
+            PriceType::Ask,
+            quotes_bid.clone(),
+            quotes_ask.clone(),
+        );
+        assert_eq!(rate_ask, dec!(1.1002));
+
+        // Test mid price
+        let rate_mid = get_exchange_rate(
+            Currency::from_str("EUR").unwrap(),
+            Currency::from_str("USD").unwrap(),
+            PriceType::Mid,
+            quotes_bid,
+            quotes_ask,
+        );
+        assert_eq!(rate_mid, dec!(1.1001));
+    }
+
+    #[test]
+    /// Test inverse pair calculation
+    fn test_inverse_pair() {
+        let (quotes_bid, quotes_ask) = setup_test_quotes();
+
+        let rate = get_exchange_rate(
+            Currency::from_str("USD").unwrap(),
+            Currency::from_str("EUR").unwrap(),
+            PriceType::Mid,
+            quotes_bid,
+            quotes_ask,
+        );
+
+        // USD/EUR should be approximately 1/1.1001
+        let expected = Decimal::ONE / dec!(1.1001);
+        assert!((rate - expected).abs() < dec!(0.0001));
+    }
+
+    #[test]
+    /// Test cross pair calculation through USD
+    fn test_cross_pair_through_usd() {
+        let (quotes_bid, quotes_ask) = setup_test_quotes();
+
+        let rate = get_exchange_rate(
+            Currency::from_str("EUR").unwrap(),
+            Currency::from_str("JPY").unwrap(),
+            PriceType::Mid,
+            quotes_bid,
+            quotes_ask,
+        );
+
+        // EUR/JPY should be approximately EUR/USD * USD/JPY
+        let expected = dec!(1.1001) * dec!(110.01);
+        assert!((rate - expected).abs() < dec!(0.01));
+    }
+
+    #[test]
+    /// Test cross pair calculation through multiple paths
+    fn test_multiple_path_cross_pair() {
+        let (quotes_bid, quotes_ask) = setup_test_quotes();
+
+        let rate = get_exchange_rate(
+            Currency::from_str("GBP").unwrap(),
+            Currency::from_str("AUD").unwrap(),
+            PriceType::Mid,
+            quotes_bid,
+            quotes_ask,
+        );
+
+        // GBP/AUD should be calculated through USD
+        // GBP/USD * (1/AUD/USD)
+        let expected = dec!(1.3001) / dec!(0.7501);
+        assert!((rate - expected).abs() < dec!(0.01));
+    }
+
+    #[test]
+    /// Test handling of missing pairs
+    fn test_missing_pairs() {
+        let mut quotes_bid = HashMap::new();
+        let mut quotes_ask = HashMap::new();
+
+        // Only adding one pair
+        quotes_bid.insert(Symbol::from_str_unchecked("EUR/USD"), dec!(1.1000));
+        quotes_ask.insert(Symbol::from_str_unchecked("EUR/USD"), dec!(1.1002));
+
+        let rate = get_exchange_rate(
+            Currency::from_str("EUR").unwrap(),
+            Currency::from_str("JPY").unwrap(),
+            PriceType::Mid,
+            quotes_bid,
+            quotes_ask,
+        );
+
+        assert_eq!(rate, Decimal::ZERO); // Should return 0 for impossible conversions
+    }
+
+    #[test]
+    #[should_panic]
+    /// Test empty quotes handling
+    fn test_empty_quotes() {
+        let quotes_bid = HashMap::new();
+        let quotes_ask = HashMap::new();
+
+        get_exchange_rate(
+            Currency::from_str("EUR").unwrap(),
+            Currency::from_str("USD").unwrap(),
+            PriceType::Mid,
+            quotes_bid,
+            quotes_ask,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    /// Test unequal quotes length handling
+    fn test_unequal_quotes_length() {
+        let mut quotes_bid = HashMap::new();
+        let mut quotes_ask = HashMap::new();
+
+        quotes_bid.insert(Symbol::from_str_unchecked("EUR/USD"), dec!(1.1000));
+        quotes_bid.insert(Symbol::from_str_unchecked("GBP/USD"), dec!(1.3000));
+        quotes_ask.insert(Symbol::from_str_unchecked("EUR/USD"), dec!(1.1002));
+
+        get_exchange_rate(
+            Currency::from_str("EUR").unwrap(),
+            Currency::from_str("USD").unwrap(),
+            PriceType::Mid,
+            quotes_bid,
+            quotes_ask,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    /// Test invalid price type handling
+    fn test_invalid_price_type() {
+        let (quotes_bid, quotes_ask) = setup_test_quotes();
+
+        get_exchange_rate(
+            Currency::from_str("EUR").unwrap(),
+            Currency::from_str("USD").unwrap(),
+            PriceType::Last, // Invalid price type
+            quotes_bid,
+            quotes_ask,
+        );
+    }
+
+    #[test]
+    /// Test extensive cross pairs
+    fn test_extensive_cross_pairs() {
+        let mut quotes_bid = HashMap::new();
+        let mut quotes_ask = HashMap::new();
+
+        // Create a complex network of currency pairs
+        let pairs = vec![
+            ("EUR/USD", (1.1000, 1.1002)),
+            ("GBP/USD", (1.3000, 1.3002)),
+            ("USD/JPY", (110.00, 110.02)),
+            ("EUR/GBP", (0.8461, 0.8463)),
+            ("AUD/USD", (0.7500, 0.7502)),
+            ("NZD/USD", (0.7000, 0.7002)),
+            ("USD/CAD", (1.2500, 1.2502)),
+        ];
+
+        for (pair, (bid, ask)) in pairs {
+            quotes_bid.insert(
+                Symbol::from_str_unchecked(pair),
+                Decimal::from_f64(bid).unwrap(),
+            );
+            quotes_ask.insert(
+                Symbol::from_str_unchecked(pair),
+                Decimal::from_f64(ask).unwrap(),
+            );
+        }
+
+        // Test various cross pairs
+        let test_pairs = vec![
+            ("EUR", "JPY", 121.022), // EUR/USD * USD/JPY
+            ("GBP", "JPY", 143.024), // GBP/USD * USD/JPY
+            ("AUD", "JPY", 82.51),   // AUD/USD * USD/JPY
+            ("EUR", "CAD", 1.375),   // EUR/USD * USD/CAD
+            ("NZD", "CAD", 0.875),   // NZD/USD * USD/CAD
+            ("AUD", "NZD", 1.071),   // AUD/USD / NZD/USD
+        ];
+
+        for (from, to, expected) in test_pairs {
+            let rate = get_exchange_rate(
+                Currency::from_str(from).unwrap(),
+                Currency::from_str(to).unwrap(),
+                PriceType::Mid,
+                quotes_bid.clone(),
+                quotes_ask.clone(),
+            );
+
+            let expected_dec = Decimal::from_f64(expected).unwrap();
+            assert!(
+                (rate - expected_dec).abs() < dec!(0.01),
+                "Failed for pair {from}/{to}: got {rate}, expected {expected_dec}"
+            );
+        }
+    }
+
+    #[test]
+    /// Test rate consistency
+    fn test_rate_consistency() {
+        let (quotes_bid, quotes_ask) = setup_test_quotes();
+
+        let rate_eur_usd = get_exchange_rate(
+            Currency::from_str("EUR").unwrap(),
+            Currency::from_str("USD").unwrap(),
+            PriceType::Mid,
+            quotes_bid.clone(),
+            quotes_ask.clone(),
+        );
+
+        let rate_usd_eur = get_exchange_rate(
+            Currency::from_str("USD").unwrap(),
+            Currency::from_str("EUR").unwrap(),
+            PriceType::Mid,
+            quotes_bid,
+            quotes_ask,
+        );
+
+        // Check if one rate is the inverse of the other
+        assert!((rate_eur_usd * rate_usd_eur - Decimal::ONE).abs() < dec!(0.0001));
+    }
 }
