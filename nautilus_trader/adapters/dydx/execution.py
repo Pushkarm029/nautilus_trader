@@ -1017,7 +1017,7 @@ class DYDXExecutionClient(LiveExecutionClient):
         good_til_block: int | None = None
 
         if dydx_order_tags.is_short_term_order is False and order.order_type == OrderType.MARKET:
-            rejection_reason = "Cannot submit order: long term market order not supported by dYdX"
+            rejection_reason = "Cannot submit order: long term market order not supported by dYdX."
             self.generate_order_rejected(
                 strategy_id=order.strategy_id,
                 instrument_id=order.instrument_id,
