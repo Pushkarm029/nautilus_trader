@@ -392,7 +392,7 @@ class TardisDataClient(LiveMarketDataClient):
         end: pd.Timestamp | None = None,
     ) -> None:
         self._log.error(
-            f"Cannot request historical quote ticks for {instrument_id}: not supported in this version",
+            f"Cannot request historical quotes for {instrument_id}: not supported in this version",
         )
 
     async def _request_trade_ticks(
@@ -404,7 +404,7 @@ class TardisDataClient(LiveMarketDataClient):
         end: pd.Timestamp | None = None,
     ) -> None:
         self._log.error(
-            f"Cannot request historical trade ticks for {instrument_id}: not supported in this version",
+            f"Cannot request historical trades for {instrument_id}: not supported in this version",
         )
 
     async def _request_bars(

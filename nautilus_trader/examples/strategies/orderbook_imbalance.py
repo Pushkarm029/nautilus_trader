@@ -60,6 +60,8 @@ class OrderBookImbalanceConfig(StrategyConfig, frozen=True):
         The order book type for the strategy.
     use_quote_ticks : bool, default False
         If quotes should be used.
+    subscribe_ticker : bool, default False
+        If tickers should be subscribed to.
 
     """
 

@@ -591,9 +591,9 @@ class BinanceCommonDataClient(LiveMarketDataClient):
         if not self._use_agg_trade_ticks:
             if start is not None or end is not None:
                 self._log.warning(
-                    "Trade ticks have been requested with a from/to time range, "
+                    "Trades have been requested with a from/to time range, "
                     f"however the request will be for the most recent {limit}: "
-                    "consider using aggregated trade ticks (`use_agg_trade_ticks`)",
+                    "consider using aggregated trades (`use_agg_trade_ticks`)",
                 )
             ticks = await self._http_market.request_trade_ticks(
                 instrument_id=instrument_id,
