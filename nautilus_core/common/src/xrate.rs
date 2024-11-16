@@ -27,12 +27,9 @@ use itertools::Itertools;
 use nautilus_core::correctness::{check_equal_usize, check_map_not_empty, FAILED};
 use nautilus_model::{enums::PriceType, identifiers::Symbol, types::currency::Currency};
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use ustr::Ustr;
 
-const DECIMAL_ONE: Decimal = dec!(1.0);
-const DECIMAL_TWO: Decimal = dec!(2.0);
-
+// TODO: Improve efficiency: Check Top Comment
 /// Returns the calculated exchange rate for the given price type using the
 /// given dictionary of bid and ask quotes.
 pub fn get_exchange_rate(
@@ -41,7 +38,7 @@ pub fn get_exchange_rate(
     price_type: PriceType,
     quotes_bid: HashMap<Symbol, Decimal>,
     quotes_ask: HashMap<Symbol, Decimal>,
-) -> anyhow::Result<Decimal> {
+) -> Decimal {
     check_map_not_empty(&quotes_bid, stringify!(quotes_bid)).expect(FAILED);
     check_map_not_empty(&quotes_ask, stringify!(quotes_ask)).expect(FAILED);
     check_equal_usize(
@@ -53,91 +50,168 @@ pub fn get_exchange_rate(
     .expect(FAILED);
 
     if from_currency == to_currency {
-        return Ok(DECIMAL_ONE); // No conversion necessary
+        return Decimal::ONE;
     }
 
-    let calculation_quotes: HashMap<Symbol, Decimal> = match price_type {
+    let calculation_quotes = match price_type {
         PriceType::Bid => quotes_bid,
         PriceType::Ask => quotes_ask,
-        PriceType::Mid => {
-            let mut calculation_quotes = HashMap::new();
-            for (symbol, bid_quote) in &quotes_bid {
-                if let Some(ask_quote) = quotes_ask.get(symbol) {
-                    calculation_quotes.insert(*symbol, (bid_quote + ask_quote) / DECIMAL_TWO);
-                }
-            }
-            calculation_quotes
+        PriceType::Mid => quotes_bid
+            .iter()
+            .map(|(k, v)| {
+                let ask = quotes_ask.get(k).unwrap_or(v);
+                (*k, (v + ask) / Decimal::TWO)
+            })
+            .collect(),
+        _ => {
+            panic!(
+                "Cannot calculate exchange rate for PriceType: {:?}",
+                price_type
+            );
         }
-        _ => panic!("Cannot calculate exchange rate for PriceType {price_type:?}"),
     };
 
+    let mut codes = HashSet::new();
     let mut exchange_rates: HashMap<Ustr, HashMap<Ustr, Decimal>> = HashMap::new();
 
     // Build quote table
-    for (symbol, quote) in &calculation_quotes {
+    for (symbol, quote) in calculation_quotes.iter() {
+        // Split symbol into currency pairs
         let pieces: Vec<&str> = symbol.as_str().split('/').collect();
         let code_lhs = Ustr::from(pieces[0]);
         let code_rhs = Ustr::from(pieces[1]);
 
-        let lhs_rates = exchange_rates.entry(code_lhs).or_default();
-        lhs_rates.insert(code_lhs, Decimal::new(1, 0));
-        lhs_rates.insert(code_rhs, *quote);
-
-        let rhs_rates = exchange_rates.entry(code_rhs).or_default();
-        rhs_rates.insert(code_lhs, Decimal::new(1, 0));
-        rhs_rates.insert(code_rhs, *quote);
-    }
-
-    // Clone exchange_rates to avoid borrowing conflicts
-    let exchange_rates_cloned = exchange_rates.clone();
-
-    // Generate possible currency pairs from all symbols
-    let mut codes: HashSet<&Ustr> = HashSet::new();
-    for (code_lhs, code_rhs) in exchange_rates_cloned.keys().flat_map(|k| {
-        exchange_rates_cloned
-            .keys()
-            .map(move |code_rhs| (k, code_rhs))
-    }) {
         codes.insert(code_lhs);
         codes.insert(code_rhs);
+
+        // Initialize currency dictionaries if they don't exist
+        exchange_rates.entry(code_lhs).or_default();
+        exchange_rates.entry(code_rhs).or_default();
+
+        // Add base rates
+        if let Some(rates_lhs) = exchange_rates.get_mut(&code_lhs) {
+            rates_lhs.insert(code_lhs, Decimal::ONE);
+            rates_lhs.insert(code_rhs, *quote);
+        }
+        if let Some(rates_rhs) = exchange_rates.get_mut(&code_rhs) {
+            rates_rhs.insert(code_rhs, Decimal::ONE);
+        }
     }
-    let _code_perms: Vec<(&Ustr, &Ustr)> = codes
+
+    // Generate possible currency pairs from all symbols
+    let code_perms: Vec<(Ustr, Ustr)> = codes
         .iter()
         .cartesian_product(codes.iter())
         .filter(|(a, b)| a != b)
         .map(|(a, b)| (*a, *b))
         .collect();
 
-    // TODO: Unable to solve borrowing issues for now (see top comment)
     // Calculate currency inverses
-    // for (perm_0, perm_1) in code_perms.iter() {
-    //     let exchange_rates_perm_0 = exchange_rates.entry(**perm_0).or_insert_with(HashMap::new);
-    //     let exchange_rates_perm_1 = exchange_rates.entry(**perm_1).or_insert_with(HashMap::new);
-    //     if !exchange_rates_perm_0.contains_key(perm_1) {
-    //         if let Some(rate) = exchange_rates_perm_0.get(perm_1) {
-    //             exchange_rates_perm_1
-    //                 .entry(**perm_0)
-    //                 .or_insert_with(|| Decimal::new(1, 0) / rate);
-    //         }
-    //     }
-    //     if !exchange_rates_perm_1.contains_key(perm_0) {
-    //         if let Some(rate) = exchange_rates_perm_1.get(perm_0) {
-    //             exchange_rates_perm_0
-    //                 .entry(**perm_1)
-    //                 .or_insert_with(|| Decimal::new(1, 0) / rate);
-    //         }
-    //     }
-    // }
+    for (perm0, perm1) in code_perms.iter() {
+        // First direction: perm0 -> perm1
+        let rate_0_to_1 = exchange_rates
+            .get(perm0)
+            .and_then(|rates| rates.get(perm1))
+            .copied();
 
-    if let Some(quotes) = exchange_rates.get(&from_currency.code) {
-        if let Some(xrate) = quotes.get(&to_currency.code) {
-            return Ok(*xrate);
+        if let Some(rate) = rate_0_to_1 {
+            if let Some(xrate_perm1) = exchange_rates.get_mut(perm1) {
+                if !xrate_perm1.contains_key(perm0) {
+                    xrate_perm1.insert(*perm0, Decimal::ONE / rate);
+                }
+            }
+        }
+
+        // Second direction: perm1 -> perm0
+        let rate_1_to_0 = exchange_rates
+            .get(perm1)
+            .and_then(|rates| rates.get(perm0))
+            .copied();
+
+        if let Some(rate) = rate_1_to_0 {
+            if let Some(xrate_perm0) = exchange_rates.get_mut(perm0) {
+                if !xrate_perm0.contains_key(perm1) {
+                    xrate_perm0.insert(*perm1, Decimal::ONE / rate);
+                }
+            }
         }
     }
 
-    // TODO: Improve efficiency
-    let empty: HashMap<Ustr, Decimal> = HashMap::new();
-    let quotes = exchange_rates.get(&from_currency.code).unwrap_or(&empty);
+    // Check if we already have the rate
+    if let Some(quotes) = exchange_rates.get(&from_currency.code) {
+        if let Some(&rate) = quotes.get(&to_currency.code) {
+            return rate;
+        }
+    }
 
-    Ok(quotes.get(&to_currency.code).copied().unwrap_or(dec!(0.0)))
+    // Calculate remaining exchange rates through common currencies
+    for (perm0, perm1) in code_perms.iter() {
+        // Skip if rate already exists
+        if exchange_rates
+            .get(perm1)
+            .map_or(false, |rates| rates.contains_key(perm0))
+        {
+            continue;
+        }
+
+        // Search for common currency
+        for code in codes.iter() {
+            // First check: rates through common currency
+            let rates_through_common = {
+                let rates_perm0 = exchange_rates.get(perm0);
+                let rates_perm1 = exchange_rates.get(perm1);
+
+                match (rates_perm0, rates_perm1) {
+                    (Some(rates0), Some(rates1)) => {
+                        if let (Some(&rate1), Some(&rate2)) = (rates0.get(code), rates1.get(code)) {
+                            Some((rate1, rate2))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            };
+
+            // Second check: rates from code's perspective
+            let rates_from_code = if rates_through_common.is_none() {
+                if let Some(rates_code) = exchange_rates.get(code) {
+                    if let (Some(&rate1), Some(&rate2)) =
+                        (rates_code.get(perm0), rates_code.get(perm1))
+                    {
+                        Some((rate1, rate2))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Apply the found rates if any
+            if let Some((common_rate1, common_rate2)) = rates_through_common.or(rates_from_code) {
+                // Insert forward rate
+                if let Some(rates_perm1) = exchange_rates.get_mut(perm1) {
+                    rates_perm1.insert(*perm0, common_rate2 / common_rate1);
+                }
+
+                // Insert inverse rate
+                if let Some(rates_perm0) = exchange_rates.get_mut(perm0) {
+                    if !rates_perm0.contains_key(perm1) {
+                        rates_perm0.insert(*perm1, common_rate1 / common_rate2);
+                    }
+                }
+            }
+        }
+    }
+
+    let xrate = exchange_rates
+        .get(&from_currency.code)
+        .and_then(|quotes| quotes.get(&to_currency.code))
+        .copied()
+        .unwrap_or(Decimal::ZERO);
+
+    xrate
 }

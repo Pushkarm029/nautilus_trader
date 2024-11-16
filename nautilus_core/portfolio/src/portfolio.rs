@@ -41,7 +41,7 @@ use nautilus_common::{cache::Cache, clock::Clock, msgbus::MessageBus};
 use nautilus_model::{
     accounts::any::AccountAny,
     data::quote::QuoteTick,
-    enums::{OrderSide, PositionSide, PriceType},
+    enums::{OrderSide, OrderType, PositionSide, PriceType},
     events::{account::state::AccountState, order::OrderEventAny, position::PositionEvent},
     identifiers::{InstrumentId, Venue},
     instruments::any::InstrumentAny,
@@ -99,7 +99,9 @@ impl Portfolio {
 
         {
             let burrowed_msgbus = msgbus.borrow();
+
             // Register endpoints
+            // burrowed_msgbus.register("Portfolio.update_account", update_account);
             // msgbus
             //     .borrow()
             //     .register("Portfolio.update_account", Self::update_account);
@@ -635,6 +637,8 @@ impl Portfolio {
         todo!();
     }
 
+    // REMOVE THIS COMMENT after msgbus
+    // NEEDS: quote,
     pub fn update_quote_tick(&mut self, quote: &QuoteTick) {
         self.unrealized_pnls.remove(&quote.instrument_id);
 
@@ -663,15 +667,106 @@ impl Portfolio {
 
         let orders_open = borrowed_cache.orders_open(None, Some(&quote.instrument_id), None, None);
 
+        // todo
         // Initialize initial (order) margin
         // let result_init = self.accounts.
     }
 
     pub fn update_account(&mut self, event: &AccountState) {
-        todo!()
+        let mut borrowed_cache = self.cache.borrow_mut();
+
+        let account = match borrowed_cache.account(&event.account_id) {
+            Some(existing) => {
+                let mut account = existing.clone();
+                account.apply(event.clone());
+                account
+            }
+            None => AccountAny::from_events(vec![event.clone()]).unwrap(),
+        };
+
+        // improve error handling: TODO
+        borrowed_cache.update_account(account).unwrap();
+
+        log::info!("Updated {}", event);
     }
 
     pub fn update_order(&mut self, event: &OrderEventAny) {
+        let borrowed_cache = self.cache.borrow();
+
+        let account_id = match event.account_id() {
+            Some(account_id) => account_id,
+            None => {
+                return; // No Account Assigned
+            }
+        };
+
+        let account = match borrowed_cache.account(&account_id) {
+            Some(account) => account,
+            None => {
+                log::error!(
+                    "Cannot update order: no account registered for {}",
+                    account_id
+                );
+                return;
+            }
+        };
+
+        match account {
+            AccountAny::Cash(cash_account) => {
+                if !cash_account.base.calculate_account_state {
+                    return;
+                }
+            }
+            AccountAny::Margin(margin_account) => {
+                if !margin_account.base.calculate_account_state {
+                    return;
+                }
+            }
+        }
+
+        match event {
+            OrderEventAny::Accepted(_)
+            | OrderEventAny::Canceled(_)
+            | OrderEventAny::Rejected(_)
+            | OrderEventAny::Updated(_)
+            | OrderEventAny::Filled(_) => {}
+            _ => {
+                return;
+            }
+        }
+
+        // let order = borrowed_cache.order(&event.client_order_id());
+        let order = match borrowed_cache.order(&event.client_order_id()) {
+            Some(order) => order,
+            None => {
+                log::error!(
+                    "Cannot update order: {} not found in the cache",
+                    event.client_order_id()
+                );
+                return; // No Order Found
+            }
+        };
+
+        if matches!(event, OrderEventAny::Rejected(_)) && order.order_type() != OrderType::StopLimit
+        {
+            return; // No change to account state
+        }
+
+        let instrument = match borrowed_cache.instrument(&event.instrument_id()) {
+            Some(instrument_id) => instrument_id,
+            None => {
+                log::error!(
+                    "Cannot update order: no instrument found for {}",
+                    event.instrument_id()
+                );
+                return;
+            }
+        };
+
+        if matches!(event, OrderEventAny::Filled(_)) {
+            todo!("accounts,updates_balance")
+        }
+
         todo!()
     }
 
@@ -895,12 +990,13 @@ impl Portfolio {
                 self.cache
                     .borrow()
                     .get_xrate(
-                        &instrument.id().venue,
-                        &instrument.settlement_currency(),
-                        &base_currency,
-                        Some(&price_type),
+                        instrument.id().venue,
+                        instrument.settlement_currency(),
+                        base_currency,
+                        price_type,
                     )
                     .to_f64()
+                    // todo: improve error
                     .expect("Fails to convert Decimal to f64")
             }
             None => 1.0, // No conversion needed
