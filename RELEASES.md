@@ -1,22 +1,18 @@
 # NautilusTrader 1.207.0 Beta
 
-Released on 17th November 2024 (UTC).
+Released on TBD (UTC).
 
 ### Enhancements
 None
-- Improved `Cache` behavior when adding more recent quotes, trades, or bars (now adds to cache)
 
 ### Internal Improvements
-- Improved live engines error logging (will now log all exceptions rather than just `RuntimeError`)
-- Improved symbol normalization for Tardis
-- Refined `HttpClient` for use directly from Rust
-- Upgraded `datafusion` crate to v43.0.0 (#2056), thanks @twitu
+- Upgraded `datafusion` crate to v0.43.0 (#2056), thanks @twitu
 
 ### Breaking Changes
-- Renamed `TriggerType.LAST_TRADE` to `LAST_PRICE`
+None
 
 ### Fixes
-- Fixed missing venue -> exchange mappings for Tardis integration
+None
 
 ---
 
@@ -29,6 +25,7 @@ Released on 17th November 2024 (UTC).
 - Added `TardisInstrumentProvider` providing instrument definitions from Tardis through the HTTP instrument metadata API
 - Added `Portfolio.realized_pnl(...)` method for per instrument realized PnL (based on positions)
 - Added `Portfolio.realized_pnls(...)` method for per venue realized PnL (based on positions)
+- Added `PolymarketExecClientConfig.generate_order_history_from_trades` config setting (default False and not currently recommended)
 - Added configuration warning for `InstrumentProvider` (to warn when node starts with no instrument loading)
 - Implemented Tardis optional [symbol normalization](https://nautilustrader.io/docs/nightly/integrations/tardis/#symbology-and-normalization)
 - Implemented `WebSocketClient` reconnection retries (#2044), thanks @davidsblom
