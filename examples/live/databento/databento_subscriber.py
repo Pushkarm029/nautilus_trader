@@ -49,7 +49,6 @@ instrument_ids = [
     # InstrumentId.from_str("ES.FUT.GLBX"),
     # InstrumentId.from_str("CL.FUT.GLBX"),
     # InstrumentId.from_str("LO.OPT.GLBX"),
-    # InstrumentId.from_str("AAPL.XNAS"),
     # InstrumentId.from_str("AAPL.IEXG"),
 ]
 
