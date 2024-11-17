@@ -40,7 +40,6 @@ pub struct AccountsManager {
 }
 
 impl AccountsManager {
-    #[must_use]
     pub fn update_balances(
         &self,
         account: AccountAny,
@@ -50,7 +49,6 @@ impl AccountsManager {
         todo!()
     }
 
-    #[must_use]
     pub fn update_orders(
         &self,
         account: AccountAny,
@@ -61,7 +59,6 @@ impl AccountsManager {
         todo!()
     }
 
-    #[must_use]
     pub fn update_positions(
         &self,
         account: MarginAccount,
