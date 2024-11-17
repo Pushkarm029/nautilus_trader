@@ -341,23 +341,24 @@ impl DataEngine {
     }
 
     pub fn execute(&mut self, cmd: SubscriptionCommand) {
-        match cmd.action {
+        let result = match cmd.action {
             Action::Subscribe => match cmd.data_type.type_name() {
                 stringify!(OrderBookDelta) => self.handle_subscribe_book_deltas(&cmd),
                 stringify!(OrderBook) => self.handle_subscribe_book_snapshots(&cmd),
                 stringify!(Bar) => self.handle_subscribe_bars(&cmd),
-                type_name => Err(anyhow::anyhow!(
-                    "Cannot handle subscription, type `{type_name}` is unrecognized"
-                )),
+                _ => Ok(()), // No other actions for engine
             },
             Action::Unsubscribe => match cmd.data_type.type_name() {
                 stringify!(OrderBookDelta) => self.handle_unsubscribe_book_deltas(&cmd),
                 stringify!(OrderBook) => self.handle_unsubscribe_book_snapshots(&cmd),
                 stringify!(Bar) => self.handle_unsubscribe_bars(&cmd),
-                type_name => Err(anyhow::anyhow!(
-                    "Cannot handle subscription, type `{type_name}` is unrecognized"
-                )),
+                _ => Ok(()), // No other actions for engine
             },
+        };
+
+        if let Err(e) = result {
+            log::error!("{e}");
+            return;
         }
 
         if let Some(client) = self.get_client_mut(&cmd.client_id, &cmd.venue) {
