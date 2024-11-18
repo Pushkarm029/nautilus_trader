@@ -18,6 +18,7 @@
 use std::{collections::HashMap, hash::Hash, sync::Arc, time::Duration};
 
 use bytes::Bytes;
+use futures_util::{stream, StreamExt};
 use reqwest::{
     header::{HeaderMap, HeaderName},
     Method, Response, Url,
@@ -110,10 +111,10 @@ impl From<String> for HttpClientError {
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.network")
 )]
 pub struct HttpClient {
-    /// The underlying HTTP client used to make requests.
-    pub(crate) client: InnerHttpClient,
     /// The rate limiter to control the request rate.
     pub(crate) rate_limiter: Arc<RateLimiter<String, MonotonicClock>>,
+    /// The underlying HTTP client used to make requests.
+    pub(crate) client: Arc<InnerHttpClient>,
 }
 
 impl HttpClient {
@@ -124,15 +125,15 @@ impl HttpClient {
         keyed_quotas: Vec<(String, Quota)>,
         default_quota: Option<Quota>,
     ) -> Self {
+        let rate_limiter = Arc::new(RateLimiter::new_with_quota(default_quota, keyed_quotas));
         let client = InnerHttpClient {
             client: reqwest::Client::new(),
-            header_keys: Arc::new(header_keys),
+            header_keys,
         };
-        let rate_limiter = Arc::new(RateLimiter::new_with_quota(default_quota, keyed_quotas));
 
         Self {
-            client,
             rate_limiter,
+            client: Arc::new(client),
         }
     }
 
@@ -155,14 +156,24 @@ impl HttpClient {
         method: Method,
         url: String,
         headers: Option<HashMap<String, String>>,
-        body: Option<Vec<u8>>,
+        body: Option<Bytes>,
         keys: Option<Vec<String>>,
         timeout_secs: Option<u64>,
     ) -> Result<HttpResponse, HttpClientError> {
+        let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
 
-        rate_limiter.await_keys_ready(keys).await;
-        self.client
+        // Check keys for rate limiting quota
+        let keys = keys.unwrap_or_default();
+        let tasks = keys.iter().map(|key| rate_limiter.until_key_ready(key));
+
+        stream::iter(tasks)
+            .for_each(|key| async move {
+                key.await;
+            })
+            .await;
+
+        client
             .send_request(method, url, headers, body, timeout_secs)
             .await
     }
@@ -195,7 +206,7 @@ impl InnerHttpClient {
         method: Method,
         url: String,
         headers: Option<HashMap<String, String>>,
-        body: Option<Vec<u8>>,
+        body: Option<Bytes>,
         timeout_secs: Option<u64>,
     ) -> Result<HttpResponse, HttpClientError> {
         let headers = headers.unwrap_or_default();
@@ -222,7 +233,7 @@ impl InnerHttpClient {
 
         let request = match body {
             Some(b) => request_builder
-                .body(b)
+                .body(b.to_vec())
                 .build()
                 .map_err(HttpClientError::from)?,
             None => request_builder.build().map_err(HttpClientError::from)?,
@@ -376,7 +387,7 @@ mod tests {
         );
 
         let body_string = serde_json::to_string(&body).unwrap();
-        let body_bytes = body_string.into_bytes();
+        let body_bytes = Bytes::from(body_string.into_bytes());
 
         let response = client
             .send_request(

@@ -144,9 +144,17 @@ impl HttpClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
+        let keys = keys.unwrap_or_default();
+        let body = body.map(|py_bytes| Bytes::from(py_bytes.as_bytes().to_vec()));
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            rate_limiter.await_keys_ready(keys).await;
+            // TODO: Consolidate rate limiting
+            let tasks = keys.iter().map(|key| rate_limiter.until_key_ready(key));
+            stream::iter(tasks)
+                .for_each(|key| async move {
+                    key.await;
+                })
+                .await;
             client
                 .send_request(method.into(), url, headers, body, timeout_secs)
                 .await
