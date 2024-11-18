@@ -98,7 +98,7 @@ pub struct DataEngine {
     book_intervals: HashMap<NonZeroU64, HashSet<InstrumentId>>,
     book_updaters: HashMap<InstrumentId, Rc<BookUpdater>>,
     book_snapshotters: HashMap<InstrumentId, Rc<BookSnapshotter>>,
-    bar_aggregators: Vec<Box<dyn BarAggregator>>, // TODO: dyn for now
+    bar_aggregators: HashMap<BarType, Box<dyn BarAggregator>>,
     synthetic_quote_feeds: HashMap<InstrumentId, Vec<SyntheticInstrument>>,
     synthetic_trade_feeds: HashMap<InstrumentId, Vec<SyntheticInstrument>>,
     buffered_deltas_map: HashMap<InstrumentId, Vec<OrderBookDelta>>, // TODO: Use OrderBookDeltas?
@@ -127,7 +127,7 @@ impl DataEngine {
             book_intervals: HashMap::new(),
             book_updaters: HashMap::new(),
             book_snapshotters: HashMap::new(),
-            bar_aggregators: Vec::new(),
+            bar_aggregators: HashMap::new(),
             synthetic_quote_feeds: HashMap::new(),
             synthetic_trade_feeds: HashMap::new(),
             buffered_deltas_map: HashMap::new(),
@@ -677,7 +677,23 @@ impl DataEngine {
     }
 
     fn handle_subscribe_bars(&mut self, command: &SubscriptionCommand) -> anyhow::Result<()> {
-        // TODO: Handle aggregators
+        let bar_type = command.data_type.bar_type();
+
+        match bar_type.aggregation_source() {
+            AggregationSource::Internal => {
+                if !self.bar_aggregators.contains_key(&bar_type.standard()) {
+                    self.start_bar_aggregator(bar_type)?;
+                }
+            }
+            AggregationSource::External => {
+                if bar_type.instrument_id().is_synthetic() {
+                    anyhow::bail!(
+                        "Cannot subscribe for externally aggregated synthetic instrument bar data"
+                    );
+                };
+            }
+        }
+
         Ok(())
     }
 

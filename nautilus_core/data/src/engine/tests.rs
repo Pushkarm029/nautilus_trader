@@ -477,9 +477,7 @@ fn test_execute_subscribe_bars(
     data_engine: Rc<RefCell<DataEngine>>,
     data_client: DataClientAdapter,
 ) {
-    let client_id = data_client.client_id;
-    let venue = data_client.venue;
-    data_engine.borrow_mut().register_client(data_client, None);
+    init_logger_for_testing(None); // TODO: Remove once initial development completed
 
     let endpoint = switchboard.data_engine_execute;
     let handler = ShareableMessageHandler(Rc::new(SubscriptionCommandHandler {
@@ -488,7 +486,14 @@ fn test_execute_subscribe_bars(
     }));
     msgbus.borrow_mut().register(endpoint, handler);
 
-    let bar_type = BarType::from("AUDUSD.SIM-1-MINUTE-LAST-INTERNAL");
+    let audusd_sim = InstrumentAny::CurrencyPair(audusd_sim);
+    data_engine.borrow_mut().process(&audusd_sim as &dyn Any);
+
+    let client_id = data_client.client_id;
+    let venue = data_client.venue;
+    data_engine.borrow_mut().register_client(data_client, None);
+
+    let bar_type = BarType::from("AUD/USD.SIM-1-MINUTE-LAST-INTERNAL");
     let metadata = indexmap! {
         "bar_type".to_string() => bar_type.to_string(),
     };
@@ -517,6 +522,7 @@ fn test_execute_subscribe_bars(
     msgbus.borrow().send(&endpoint, &cmd as &dyn Any);
     data_engine.borrow_mut().run();
 
+    assert_eq!(audusd_sim.id(), bar_type.instrument_id());
     assert!(!data_engine.borrow().subscribed_bars().contains(&bar_type));
 }
 
