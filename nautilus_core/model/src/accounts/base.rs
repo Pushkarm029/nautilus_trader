@@ -41,7 +41,7 @@ pub struct BaseAccount {
     pub calculate_account_state: bool,
     pub events: Vec<AccountState>,
     pub commissions: HashMap<Currency, f64>,
-    pub balances: HashMap<Currency, AccountBalance>,
+    pub balances: HashMap<Currency, AccountBalance>, // want this
     pub balances_starting: HashMap<Currency, Money>,
 }
 

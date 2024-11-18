@@ -20,8 +20,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     accounts::{base::Account, cash::CashAccount, margin::MarginAccount},
     enums::AccountType,
-    events::account::state::AccountState,
+    events::{account::state::AccountState, order::OrderFilled},
     identifiers::AccountId,
+    instruments::any::InstrumentAny,
+    position::Position,
     types::{currency::Currency, money::Money},
 };
 
@@ -86,6 +88,18 @@ impl AccountAny {
             account.apply(event.clone());
         }
         Ok(account)
+    }
+
+    pub fn calculate_pnls(
+        &self,
+        instrument: InstrumentAny, // TODO: Make this a reference
+        fill: OrderFilled,         // TODO: Make this a reference
+        position: Option<Position>,
+    ) -> anyhow::Result<Vec<Money>> {
+        match self {
+            AccountAny::Margin(margin) => margin.calculate_pnls(instrument, fill, position),
+            AccountAny::Cash(cash) => cash.calculate_pnls(instrument, fill, position),
+        }
     }
 }
 
