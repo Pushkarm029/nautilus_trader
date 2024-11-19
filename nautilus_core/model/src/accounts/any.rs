@@ -24,9 +24,8 @@ use crate::{
     identifiers::AccountId,
     instruments::any::InstrumentAny,
     position::Position,
-    types::{currency::Currency, money::Money},
+    types::{balance::AccountBalance, currency::Currency, money::Money},
 };
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AccountAny {
     Margin(MarginAccount),
@@ -60,6 +59,13 @@ impl AccountAny {
         match self {
             AccountAny::Margin(margin) => margin.apply(event),
             AccountAny::Cash(cash) => cash.apply(event),
+        }
+    }
+
+    pub fn balances(&self) -> HashMap<Currency, AccountBalance> {
+        match self {
+            AccountAny::Margin(margin) => margin.balances(),
+            AccountAny::Cash(cash) => cash.balances(),
         }
     }
 

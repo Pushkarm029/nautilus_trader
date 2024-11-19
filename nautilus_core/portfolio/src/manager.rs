@@ -15,10 +15,6 @@
 
 //! Provides account management functionality.
 
-// Under development
-#![allow(dead_code)]
-#![allow(unused_variables)]
-
 use std::{cell::RefCell, rc::Rc};
 
 use nautilus_common::{cache::Cache, clock::Clock};
@@ -51,14 +47,9 @@ impl AccountsManager {
             position_id
         } else {
             let positions_open = cache.positions_open(None, Some(&fill.instrument_id), None, None);
-
-            // TODO: error handling
             positions_open
                 .first()
-                .unwrap_or_else(|| {
-                    log::error!("List of Positions is empty");
-                    panic!("List of Positions is empty")
-                })
+                .unwrap_or_else(|| panic!("List of Positions is empty"))
                 .id
         };
 
@@ -82,8 +73,8 @@ impl AccountsManager {
                 self.update_balance_single_currency(account.clone(), &fill, pnl);
             }
             None => {
-                if let Ok(pnl_list) = pnls {
-                    self.update_balance_multi_currency(account.clone(), fill, &pnl_list);
+                if let Ok(mut pnl_list) = pnls {
+                    self.update_balance_multi_currency(account.clone(), fill, &mut pnl_list);
                 }
             }
         }
@@ -100,7 +91,6 @@ impl AccountsManager {
         orders_open: &[OrderAny],
         ts_event: UnixNanos,
     ) -> Option<AccountState> {
-        // todo!()
         match account {
             AccountAny::Cash(mut cash_account) => {
                 self.update_balance_locked(&mut cash_account, instrument, orders_open, ts_event)
@@ -140,7 +130,6 @@ impl AccountsManager {
                 continue;
             }
 
-            // TODO: Can be simplified after implementing Instrument trait for InstrumentAny
             let margin_maint = match instrument {
                 InstrumentAny::Betting(i) => account.calculate_maintenance_margin(
                     i,
@@ -248,7 +237,6 @@ impl AccountsManager {
         Some(self.generate_account_state(AccountAny::Margin(account.clone()), ts_event))
     }
 
-    // TODO: improve error handling
     fn update_balance_locked(
         &self,
         account: &mut CashAccount,
@@ -257,8 +245,10 @@ impl AccountsManager {
         ts_event: UnixNanos,
     ) -> Option<AccountState> {
         if orders_open.is_empty() {
-            // TODO: fix
-            // account.clear_balance_locked(&instrument.id());
+            let balance = account.balances.remove(&instrument.quote_currency());
+            if let Some(balance) = balance {
+                account.recalculate_balance(balance.currency);
+            }
             return Some(self.generate_account_state(AccountAny::Cash(account.clone()), ts_event));
         }
 
@@ -326,9 +316,12 @@ impl AccountsManager {
         let locked_money = Money::new(total_locked.to_f64()?, currency);
 
         // Update account locked balance
-        // account.update_balance_locked(&instrument.id(), locked_money.clone());
+        if let Some(balance) = account.balances.get_mut(&instrument.quote_currency()) {
+            balance.locked = locked_money;
+            let currency = balance.currency;
+            account.recalculate_balance(currency);
+        }
 
-        // Log the update
         log::info!(
             "{} balance_locked={}",
             instrument.id(),
@@ -346,12 +339,10 @@ impl AccountsManager {
         orders_open: &[OrderAny],
         ts_event: UnixNanos,
     ) -> Option<AccountState> {
-        // Initialize variables
         let mut total_margin_init = Decimal::ZERO;
         let mut base_xrate = Decimal::ZERO;
         let mut currency = instrument.settlement_currency();
 
-        // Process each order
         for order in orders_open {
             assert_eq!(
                 order.instrument_id(),
@@ -360,12 +351,10 @@ impl AccountsManager {
                 instrument.id()
             );
 
-            // Skip if not open or no price/trigger price
             if !order.is_open() || (order.price().is_none() && order.trigger_price().is_none()) {
                 continue;
             }
 
-            // Calculate initial margin based on instrument type
             let price = if order.price().is_some() {
                 order.price()
             } else {
@@ -407,10 +396,8 @@ impl AccountsManager {
 
             let mut margin_init = margin_init.as_decimal();
 
-            // Handle base currency conversion if needed
             if let Some(base_currency) = account.base_currency {
                 if base_xrate.is_zero() {
-                    // Cache base currency and calculate exchange rate
                     currency = base_currency;
                     base_xrate = self.calculate_xrate_to_base(
                         AccountAny::Margin(account.clone()),
@@ -428,42 +415,48 @@ impl AccountsManager {
                     }
                 }
 
-                // Apply base exchange rate
                 margin_init = (margin_init * base_xrate).round_dp(currency.precision.into());
             }
 
-            // Increment total initial margin
             total_margin_init += margin_init;
         }
 
-        // Create Money object for margin init
         let money = Money::new(total_margin_init.to_f64().unwrap_or(0.0), currency);
         let margin_init_money = {
-            // Update account initial margin
             account.update_initial_margin(instrument.id(), money);
             money
         };
 
-        // Log the update
         log::info!(
             "{} margin_init={}",
             instrument.id(),
             margin_init_money.to_string()
         );
 
-        // Generate and return account state
         Some(self.generate_account_state(AccountAny::Margin(account.clone()), ts_event))
     }
 
-    fn update_balance_single_currency(&self, account: AccountAny, fill: &OrderFilled, pnl: Money) {
-        let base_currency = account.base_currency().unwrap();
-        let mut final_pnl = pnl;
+    fn update_balance_single_currency(
+        &self,
+        account: AccountAny,
+        fill: &OrderFilled,
+        mut pnl: Money,
+    ) {
+        let base_currency = if let Some(currency) = account.base_currency() {
+            currency
+        } else {
+            log::error!("Account has no base currency set");
+            return;
+        };
 
-        if let Some(commission) = &fill.commission {
-            let commission = if commission.currency != base_currency {
+        let mut balances = Vec::new();
+        let mut commission = fill.commission;
+
+        if let Some(ref mut comm) = commission {
+            if comm.currency != base_currency {
                 let xrate = self.cache.borrow().get_xrate(
                     fill.instrument_id.venue,
-                    commission.currency,
+                    comm.currency,
                     base_currency,
                     if fill.order_side == OrderSide::Sell {
                         PriceType::Bid
@@ -472,113 +465,79 @@ impl AccountsManager {
                     },
                 );
 
-                if xrate == Decimal::ZERO {
+                if xrate.is_zero() {
                     log::error!(
-                        "Cannot calculate account state: insufficient data for {}/{:?}",
-                        pnl.currency,
-                        account.base_currency()
+                        "Cannot calculate account state: insufficient data for {}/{}",
+                        comm.currency,
+                        base_currency
                     );
+                    return;
                 }
 
-                Money::new(xrate.to_f64().expect("msg"), commission.currency)
-            } else {
-                *commission
-            };
+                *comm = Money::new((comm.as_decimal() * xrate).to_f64().unwrap(), base_currency);
+            }
+        }
 
-            if pnl.currency != base_currency {
-                let xrate: Decimal = self.cache.borrow().get_xrate(
-                    fill.instrument_id.venue,
+        if pnl.currency != base_currency {
+            let xrate = self.cache.borrow().get_xrate(
+                fill.instrument_id.venue,
+                pnl.currency,
+                base_currency,
+                if fill.order_side == OrderSide::Sell {
+                    PriceType::Bid
+                } else {
+                    PriceType::Ask
+                },
+            );
+
+            if xrate.is_zero() {
+                log::error!(
+                    "Cannot calculate account state: insufficient data for {}/{}",
                     pnl.currency,
-                    base_currency,
-                    if fill.order_side == OrderSide::Sell {
-                        PriceType::Bid
-                    } else {
-                        PriceType::Ask
-                    },
+                    base_currency
                 );
-
-                if xrate == Decimal::ZERO {
-                    log::error!(
-                        "Cannot calculate account state: insufficient data for {}/{:?}",
-                        pnl.currency,
-                        account.base_currency()
-                    );
-                }
-
-                final_pnl = Money::new(
-                    (pnl.as_decimal() * xrate).to_f64().unwrap_or(0.0),
-                    base_currency,
-                );
+                return;
             }
 
-            final_pnl -= commission;
-            if final_pnl.is_zero() {
-                return; // Nothing to Adjust
-            }
+            pnl = Money::new((pnl.as_decimal() * xrate).to_f64().unwrap(), base_currency);
+        }
 
-            // // Get current balance
-            // let balance = match account.balance(None) {
-            //     Some(b) => b,
-            //     None => {
-            //         log::error!(
-            //             "Cannot complete transaction: no balance for {}",
-            //             final_pnl.currency()
-            //         );
-            //         return;
-            //     }
-            // };
+        if let Some(comm) = commission {
+            pnl -= comm;
+        }
 
-            // // Calculate new balance
-            // let new_balance = AccountBalance::new(
-            //     balance.total().add(&final_pnl),
-            //     balance.locked().clone(),
-            //     balance.free().add(&final_pnl),
-            // );
+        if pnl.is_zero() {
+            return;
+        }
 
-            // // Update account with new balances and commission
-            // match account {
-            //     AccountAny::Cash(mut cash_account) => {
-            //         cash_account.update_balances(vec![new_balance]);
-            //         cash_account.update_commissions(commission);
-            //     }
-            //     AccountAny::Margin(mut margin_account) => {
-            //         margin_account.update_balances(vec![new_balance]);
-            //         margin_account.update_commissions(commission);
-            //     }
-            // }
-            todo!("")
+        let existing_balances = account.balances();
+        let balance = if let Some(b) = existing_balances.get(&pnl.currency) {
+            b
         } else {
-            // No commission to process, just update the balance with PnL
+            log::error!(
+                "Cannot complete transaction: no balance for {}",
+                pnl.currency
+            );
+            return;
+        };
 
-            // Get current balance
-            // let balance = match account.balance(None) {
-            //     Some(b) => b,
-            //     None => {
-            //         log::error!(
-            //             "Cannot complete transaction: no balance for {}",
-            //             final_pnl.currency
-            //         );
-            //         return;
-            //     }
-            // };
+        let new_balance =
+            AccountBalance::new(balance.total + pnl, balance.locked, balance.free + pnl);
+        balances.push(new_balance);
 
-            // // Calculate new balance
-            // let new_balance = AccountBalance::new(
-            //     balance.total().add(&final_pnl),
-            //     balance.locked().clone(),
-            //     balance.free().add(&final_pnl),
-            // );
-
-            // // Update account with new balance only
-            // match account {
-            //     AccountAny::Cash(mut cash_account) => {
-            //         cash_account.update_balances(vec![new_balance]);
-            //     }
-            //     AccountAny::Margin(mut margin_account) => {
-            //         margin_account.update_balances(vec![new_balance]);
-            //     }
-            // }
-            todo!("")
+        match account {
+            AccountAny::Cash(mut cash) => {
+                cash.update_balances(balances);
+                if let Some(comm) = commission {
+                    cash.update_commissions(comm);
+                }
+            }
+            AccountAny::Margin(mut margin) => {
+                margin.update_balances(balances);
+                if let Some(comm) = commission {
+                    margin.update_commissions(comm);
+                }
+            }
         }
     }
 
@@ -586,30 +545,115 @@ impl AccountsManager {
         &self,
         account: AccountAny,
         fill: OrderFilled,
-        pnls: &[Money],
+        pnls: &mut [Money],
     ) {
-        // let balances =
-
+        let mut new_balances = Vec::new();
         let commission = fill.commission;
-        let balance: Option<AccountBalance> = None;
-        let new_balance: Option<AccountBalance> = None;
-        let apply_commission = if let Some(commission) = commission {
-            commission.as_decimal() != Decimal::ZERO
-        } else {
-            false
-        };
+        let mut apply_commission = commission.map_or(false, |c| !c.is_zero());
 
-        // for pnl in pnls {
-        //     if apply_commission && pnl.currency == commission.unwrap().currency {}
+        for pnl in pnls.iter_mut() {
+            if apply_commission && pnl.currency == commission.unwrap().currency {
+                *pnl -= commission.unwrap();
+                apply_commission = false;
+            }
 
-        //     if pnl.is_zero() {
-        //         continue; // No adjustment
-        //     }
+            if pnl.is_zero() {
+                continue; // No Adjustment
+            }
 
-        //     let currency = pnl.currency;
-        //     // let balance = account.balances_locked()
-        // }
-        todo!()
+            let currency = pnl.currency;
+            let balances = account.balances();
+
+            let new_balance = if let Some(balance) = balances.get(&currency) {
+                let new_total = balance.total.as_f64() + pnl.as_f64();
+                let new_free = balance.free.as_f64() + pnl.as_f64();
+                let total = Money::new(new_total, currency);
+                let free = Money::new(new_free, currency);
+
+                if new_total < 0.0 {
+                    log::error!(
+                        "AccountBalanceNegative: balance = {}, currency = {}",
+                        total.as_decimal(),
+                        currency
+                    );
+                    return;
+                }
+                if new_free < 0.0 {
+                    log::error!(
+                        "AccountMarginExceeded: balance = {}, margin = {}, currency = {}",
+                        total.as_decimal(),
+                        balance.locked.as_decimal(),
+                        currency
+                    );
+                    return;
+                }
+
+                AccountBalance::new(total, balance.locked, free)
+            } else {
+                if pnl.as_decimal() < Decimal::ZERO {
+                    log::error!(
+                        "Cannot complete transaction: no {} to deduct a {} realized PnL from",
+                        currency,
+                        pnl
+                    );
+                    return;
+                }
+                AccountBalance::new(*pnl, Money::new(0.0, currency), *pnl)
+            };
+
+            new_balances.push(new_balance);
+        }
+
+        if apply_commission {
+            // if apply_commission is true, then commission is not none.
+            let commission = commission.unwrap();
+            let currency = commission.currency;
+            let balances = account.balances();
+
+            let commission_balance = if let Some(balance) = balances.get(&currency) {
+                let new_total = balance.total.as_decimal() - commission.as_decimal();
+                let new_free = balance.free.as_decimal() - commission.as_decimal();
+                AccountBalance::new(
+                    Money::new(new_total.to_f64().unwrap(), currency),
+                    balance.locked,
+                    Money::new(new_free.to_f64().unwrap(), currency),
+                )
+            } else {
+                if commission.as_decimal() > Decimal::ZERO {
+                    log::error!(
+                        "Cannot complete transaction: no {} balance to deduct a {} commission from",
+                        currency,
+                        commission
+                    );
+                    return;
+                }
+                AccountBalance::new(
+                    Money::new(0.0, currency),
+                    Money::new(0.0, currency),
+                    Money::new(0.0, currency),
+                )
+            };
+            new_balances.push(commission_balance);
+        }
+
+        if new_balances.is_empty() {
+            return;
+        }
+
+        match account {
+            AccountAny::Cash(mut cash) => {
+                cash.update_balances(new_balances);
+                if let Some(commission) = commission {
+                    cash.update_commissions(commission);
+                }
+            }
+            AccountAny::Margin(mut margin) => {
+                margin.update_balances(new_balances);
+                if let Some(commission) = commission {
+                    margin.update_commissions(commission);
+                }
+            }
+        }
     }
 
     fn generate_account_state(&self, account: AccountAny, ts_event: UnixNanos) -> AccountState {
