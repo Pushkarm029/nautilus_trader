@@ -35,6 +35,10 @@ pub struct AccountsManager {
 }
 
 impl AccountsManager {
+    pub fn new(clock: Rc<RefCell<dyn Clock>>, cache: Rc<RefCell<Cache>>) -> Self {
+        Self { clock, cache }
+    }
+
     #[must_use]
     pub fn update_balances(
         &self,
@@ -86,17 +90,17 @@ impl AccountsManager {
     #[must_use]
     pub fn update_orders(
         &self,
-        account: AccountAny,
+        account: &mut AccountAny,
         instrument: InstrumentAny,
-        orders_open: &[OrderAny],
+        orders_open: Vec<&OrderAny>,
         ts_event: UnixNanos,
     ) -> Option<AccountState> {
         match account {
-            AccountAny::Cash(mut cash_account) => {
-                self.update_balance_locked(&mut cash_account, instrument, orders_open, ts_event)
+            AccountAny::Cash(cash_account) => {
+                self.update_balance_locked(cash_account, instrument, orders_open, ts_event)
             }
-            AccountAny::Margin(mut margin_account) => {
-                self.update_margin_init(&mut margin_account, instrument, orders_open, ts_event)
+            AccountAny::Margin(margin_account) => {
+                self.update_margin_init(margin_account, instrument, orders_open, ts_event)
             }
         }
     }
@@ -107,7 +111,7 @@ impl AccountsManager {
         &self,
         account: &mut MarginAccount,
         instrument: InstrumentAny,
-        positions: &[Position],
+        positions: Vec<&Position>,
         ts_event: UnixNanos,
     ) -> Option<AccountState> {
         // Initialize variables
@@ -241,7 +245,7 @@ impl AccountsManager {
         &self,
         account: &mut CashAccount,
         instrument: InstrumentAny,
-        orders_open: &[OrderAny],
+        orders_open: Vec<&OrderAny>,
         ts_event: UnixNanos,
     ) -> Option<AccountState> {
         if orders_open.is_empty() {
@@ -336,7 +340,7 @@ impl AccountsManager {
         &self,
         account: &mut MarginAccount,
         instrument: InstrumentAny,
-        orders_open: &[OrderAny],
+        orders_open: Vec<&OrderAny>,
         ts_event: UnixNanos,
     ) -> Option<AccountState> {
         let mut total_margin_init = Decimal::ZERO;
